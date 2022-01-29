@@ -10,6 +10,7 @@ import torch
 from scipy.spatial import distance_matrix
 from scipy.stats import norm
 from sklearn.ensemble import RandomForestRegressor
+from sklearn.neighbors import KNeighborsRegressor
 
 class Agent():
     def __init__(self, number_of_algorithms):
@@ -29,25 +30,27 @@ class Agent():
         self.count = 0
         self.observed_configs = []
         self.observed_response = []
+        self.observed_cost = []
         #self.device =  torch.device("cuda" if torch.cuda.is_available() else "cpu")
         self.device = "cpu"
         self.cost_model_type = "RF"
         self.acquistion_type = "ei"
-        self.conf = {"kernel":"rbf", 
+        self.conf = {"kernel":"52", 
                     "nu":2.5, 
                     "ard":None, 
                     "device": self.device, 
                     "context_size": 10, 
-                    "lr":0.01, 
+                    "lr":0.05, 
                     "loss_tol": 0.001}
 
         self.meta_learning_epochs = 5
-        self.finetuning_lr = 0.001
+        self.finetuning_lr = 0.01
         self.finetuning_epochs = 10
         self.finetuning_patience = 100
         self.n_hidden = 10
         self.n_layers = 2
         self.n_batches = 1000
+        self.n_init = 2
     
     def reset(self, dataset_meta_features, algorithms_meta_features):
         """
@@ -102,7 +105,7 @@ class Agent():
         self.dataset_meta_features = dataset_meta_features
         self.algorithms_meta_features = algorithms_meta_features
         self.validation_last_scores = [0.0 for i in range(self.nA)]
-        self.algorithms_cost_count = [None for i in range(self.nA)]
+        self.algorithms_cost_count = [0.0 for i in range(self.nA)]
         self.count = torch.zeros(self.nA).to(self.device)
         self.convergence = torch.ones(self.nA).to(self.device)
         self.trials  = torch.zeros(self.nA).to(self.device)
@@ -121,6 +124,7 @@ class Agent():
 
             d = distance_matrix(self.dataset_features, self.metatrain_dataset_features)
             self.most_similar_metatrain_dataset = self.index_dataset[np.argmin(d)]
+            self.similar_algorithms_sorted = np.argsort(d)
             self.initial_alg_test_id= self.best_algorithm_per_dataset[self.most_similar_metatrain_dataset]["id_test"]
             self.initial_alg_val_id= self.best_algorithm_per_dataset[self.most_similar_metatrain_dataset]["id_val"]
 
@@ -317,6 +321,8 @@ class Agent():
             self.time_used = 0
             self.observed_configs = []
             self.observed_response = []
+            self.observed_cost = []
+            self.predicted_cost = []
             a = None
             b =  self.algorithms_list.index(self.initial_alg_val_id)
 
@@ -327,7 +333,8 @@ class Agent():
                 c = self.cost_model(x).item()
             else:
                 c = self.cost_model.predict(np.array(x).reshape(1,-1)).item()
-
+                c = np.exp(c).item()
+                self.predicted_cost.append(c)
             return a,b,c
         
         else:
@@ -337,33 +344,45 @@ class Agent():
             self.iter += 1
             
             #self.convergence keeps track of the algorithms that converged (=0) to omit them in EI
-            if y_val == self.validation_last_scores[algorithm_index]  and y_val !=0: 
+            if y_val == self.validation_last_scores[algorithm_index]  and y_val !=0 and ts==self.algorithms_cost_count[algorithm_index]: 
                 self.convergence[algorithm_index]=0
             else:
                 self.validation_last_scores[algorithm_index] = y_val
 
             #self.trials -> how many times the algorithm has returned 0
-            if y_val !=0:
-                self.trials[algorithm_index]=0           
-            else:
-                self.trials[algorithm_index]+=1
+            #if y_val !=0:
+            #    self.trials[algorithm_index]=0           
+            #else:
+            #    self.trials[algorithm_index]+=1
                 
             #self.count ->  budge count,  just increase when the algorithm did finished
             if ts!=self.algorithms_cost_count[algorithm_index]:
                 self.count[algorithm_index]+=1
+
+            if y_val !=0:
+                self.trials[algorithm_index]=0           
+            else:
+                self.trials[algorithm_index]+=1            
+
             
             #adds the new observation to the history
-            algorithm = self.algorithms_list[algorithm_index]
-            j = self.count[algorithm_index]
-            algorithm_meta_feat = [float(x) for x in list(self.algorithms_meta_features[algorithm].values())]
-    
-            self.observed_configs.append(algorithm_meta_feat+self.dataset_features.tolist()[0]+[j])
-            self.observed_response.append(y_val)
+
+            if  ts!=self.algorithms_cost_count[algorithm_index] or len(self.observed_configs)==0:
+
+                algorithm = self.algorithms_list[algorithm_index]
+                j = self.count[algorithm_index]
+                algorithm_meta_feat = [float(x) for x in list(self.algorithms_meta_features[algorithm].values())]
+        
+                self.observed_configs.append(algorithm_meta_feat+self.dataset_features.tolist()[0]+[j])
+                self.observed_response.append(y_val)
+                #self.observed_cost.append(ts-self.algorithms_cost_count[algorithm_index])
+                self.algorithms_cost_count[algorithm_index] = ts
 
             #finetune surrogate
             x_spt = torch.FloatTensor(self.observed_configs).to(self.device)
             y_spt = torch.FloatTensor(self.observed_response).to(self.device)
             loss_history = self.fsbo_model.finetuning(x_spt,y_spt, epochs = self.finetuning_epochs, finetuning_lr = self.finetuning_lr, patience=self.finetuning_patience)
+            
             x_qry = torch.concat((self.X_pre, self.count.reshape(-1,1)), axis=1)
 
             #predicts cost
@@ -372,9 +391,21 @@ class Agent():
             else:
                 y_pred_cost = self.cost_model.predict(np.array(x_qry))
                 y_pred_cost = torch.FloatTensor(y_pred_cost)
+
+
+            #second prediction
+            x = np.array(self.observed_configs)
+            y = np.array(self.observed_cost)
+            non_zero_id = np.where(y!=0)[0]
+            n_observed = len(non_zero_id)
+            if n_observed>0:
+                neigh = KNeighborsRegressor(n_neighbors=min(5,n_observed))
+                neigh.fit(x[non_zero_id], y[non_zero_id])
+                y_pred = neigh.predict(np.array(x_qry))            
+            
             
             #compute acqusition function
-            best_y = torch.max(y_spt).item()
+            best_y =max(self.observed_response)
             mean, std = self.fsbo_model.predict(x_spt,y_spt, x_qry) 
             ei = torch.FloatTensor(self.EI(mean,std, best_y)).to(self.device)
 
@@ -389,7 +420,11 @@ class Agent():
             a = np.argmax(self.validation_last_scores)
             b = next_algorithm
             c = y_pred_cost[next_algorithm].item()
+
+            self.predicted_cost.append(np.exp(c).item())
+
             c = np.exp(self.trials[next_algorithm]+c).item()
+            
 
             return a,b, c
 

@@ -141,10 +141,11 @@ class FSBO(nn.Module):
     def train(self, epochs = 10, n_batches=100):
         
         best_loss = np.inf
-        optimizer = torch.optim.Adam(self.parameters(), lr= self.lr)
+        
         val_losses = []
 
         for epoch in range(epochs):
+            optimizer = torch.optim.Adam(self.parameters(), lr= self.lr)
             scheduler = self.scheduler_fn(optimizer, n_batches)
             for batch in range(n_batches):
                 optimizer.zero_grad()
