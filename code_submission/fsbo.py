@@ -148,17 +148,22 @@ class FSBO(nn.Module):
             optimizer = torch.optim.Adam(self.parameters(), lr= self.lr)
             scheduler = self.scheduler_fn(optimizer, n_batches)
             for batch in range(n_batches):
-                optimizer.zero_grad()
-                x, y = self.get_train_batch()
 
-                z = self.feature_extractor(x)
-                self.model.set_train_data(inputs=z, targets=y)
-                predictions = self.model(z)
-                loss = -self.mll(predictions, self.model.train_targets)
-                loss.backward()
-                optimizer.step()
-                scheduler.step()
-                
+                try:
+                    optimizer.zero_grad()
+                    x, y = self.get_train_batch()
+
+                    z = self.feature_extractor(x)
+                    self.model.set_train_data(inputs=z, targets=y)
+                    predictions = self.model(z)
+                    loss = -self.mll(predictions, self.model.train_targets)
+                    loss.backward()
+                    optimizer.step()
+                    scheduler.step()
+                    
+                except Exception as e:
+
+                    print(e)
         
             temp_val_loss = 0
             for task in self.validation_tasks:
