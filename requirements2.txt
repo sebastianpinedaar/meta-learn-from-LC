@@ -1,0 +1,2 @@
+## Packages our solution needs
+torch==1.10
