@@ -34,13 +34,14 @@ class Agent():
         self.device = "cpu"
         self.cost_model_type = "RF"
         self.acquistion_type = "ei"
+        #self.acquistion_type = "cost_balanced_ei"
         self.conf = {"kernel":"52", 
                     "nu":2.5, 
                     "ard":None, 
                     "device": self.device, 
                     "context_size": 10, 
                     "lr":0.05, 
-                    "loss_tol": 0.001}
+                    "loss_tol": 0.0001}
 
         self.meta_learning_epochs = 5
         self.finetuning_lr = 0.01
@@ -106,6 +107,7 @@ class Agent():
         self.algorithms_meta_features = algorithms_meta_features
         self.validation_last_scores = [0.0 for i in range(self.nA)]
         self.algorithms_cost_count = [0.0 for i in range(self.nA)]
+        self.algorithms_perf_hist = [[] for i in range(self.nA)]
         self.count = torch.zeros(self.nA).to(self.device)
         self.convergence = torch.ones(self.nA).to(self.device)
         self.trials  = torch.zeros(self.nA).to(self.device)
@@ -172,6 +174,7 @@ class Agent():
             X =[]
             y_val = []
             y_test = []
+            perf_hist = []
             time_budget = float(dataset_meta_features[dataset]["time_budget"])
             self.best_algorithm_per_dataset[dataset] = {"id_test":0, "perf_test":0, "id_val":0, "perf_val":0}
             idx = self.index_dataset.index(dataset)
@@ -188,6 +191,7 @@ class Agent():
                     X_time.append(values+temp_dataset_feat+[j,ts_prev/time_budget])
                     y_time.append(ts-ts_prev)
                     ts_prev = ts
+                    
 
                 if self.best_algorithm_per_dataset[dataset]["perf_test"]<y_test[-1]:
                     self.best_algorithm_per_dataset[dataset]["id_test"]=algorithm
@@ -196,12 +200,13 @@ class Agent():
                 if self.best_algorithm_per_dataset[dataset]["perf_val"]<y_val[-1]:
                     self.best_algorithm_per_dataset[dataset]["id_val"]=algorithm
                     self.best_algorithm_per_dataset[dataset]["perf_val"]=y_val[-1]
+                perf_hist.append([validation_learning_curves[dataset][algorithm].scores.tolist(), timestamps.tolist()])
 
             if i<split:
-                train_data[dataset] = {"X": X, "y_val": y_val, "y_test":y_test}
+                train_data[dataset] = {"X": X, "y_val": y_val, "y_test":y_test, "perf_hist":perf_hist}
             else:
-                test_data[dataset] = {"X": X, "y_val": y_val, "y_test":y_test}
-        print(y_time)
+                test_data[dataset] = {"X": X, "y_val": y_val, "y_test":y_test, "perf_hist":perf_hist}
+       
         return train_data, test_data, X_time, y_time, len(X[0])
 
 
@@ -316,6 +321,7 @@ class Agent():
         (9, 9, 80)
         """
         self.iter +=1
+        
 
         if (observation is None):
            
@@ -324,8 +330,10 @@ class Agent():
             self.observed_response = []
             self.observed_cost = []
             self.predicted_cost = []
+            self.remaining_budget_counter = self.time_budget
             a = None
             b =  self.algorithms_list.index(self.initial_alg_val_id)
+            initial_factor = 1
 
             algorithm_meta_feat = [float(x) for x in list(self.algorithms_meta_features[self.initial_alg_val_id].values())]
             x = torch.FloatTensor(algorithm_meta_feat+self.dataset_features.tolist()[0] +[0,0]).to(self.device)
@@ -337,18 +345,20 @@ class Agent():
                 c = self.cost_model.predict(np.array(x).reshape(1,-1)).item()
             
             self.predicted_cost.append(c)
-            c = np.exp(c).item()
-                
-            return a,b,c+self.bias
+            c = np.exp(c+initial_factor).item()
+            self.remaining_budget_counter-=c
+
+            return a,b,min(c, self.time_budget/2)
 
 
         else:
 
 
             algorithm_index, ts, y_val = observation
-            
+
+
             #self.convergence keeps track of the algorithms that converged (=0) to omit them in EI
-            if y_val == self.validation_last_scores[algorithm_index]  and y_val !=0 and ts==self.algorithms_cost_count[algorithm_index]: 
+            if y_val == self.validation_last_scores[algorithm_index]  and y_val !=0 :#and ts==self.algorithms_cost_count[algorithm_index]: 
                 self.convergence[algorithm_index]=0
             else:
                 self.validation_last_scores[algorithm_index] = y_val
@@ -362,6 +372,8 @@ class Agent():
             #self.count ->  budge count,  just increase when the algorithm did finished
             if ts!=self.algorithms_cost_count[algorithm_index]:
                 self.count[algorithm_index]+=1
+                self.algorithms_perf_hist[algorithm_index].append([ts, y_val])
+
 
             if y_val !=0:
                 self.trials[algorithm_index]=0           
@@ -450,8 +462,9 @@ class Agent():
                 b = next_algorithm
 
             a = np.argmax(self.validation_last_scores)
+            self.remaining_budget_counter-=c
 
-            return a,b, c+self.bias
+            return a,b, c
 
     def EI(self, mean, sigma, best_f, epsilon = 0):
 

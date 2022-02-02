@@ -258,6 +258,8 @@ class Meta_Learning_Environment():
         #=== Prepare an observation to be sent to the agent
         observation = (A, C_A, R_validation_C_A)
         print(observation)
+        print(self.validation_learning_curves[self.dataset_name][self.list_algorithms[A]].timestamps)
+        print(self.validation_learning_curves[self.dataset_name][self.list_algorithms[A]].scores)
 
         #=== Write hidden_observation to the ouput directory
         # if A_star!=None:
