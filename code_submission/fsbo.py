@@ -166,11 +166,17 @@ class FSBO(nn.Module):
                     print(e)
         
             temp_val_loss = 0
+            count = 0
             for task in self.validation_tasks:
                 val_batch = self.get_val_batch(task)
-                temp_val_loss += self.test(val_batch).detach().cpu().numpy().item()
+                done, val = self.test(val_batch)
+                temp_val_loss+= val.detach().cpu().numpy().item()
             
-            val_losses.append(temp_val_loss/len(self.validation_tasks))
+                if done:
+                    count+=1
+
+
+            val_losses.append(temp_val_loss/count)
             print(val_losses[-1])
             if best_loss>val_losses[-1]:
                 best_loss = val_losses[-1]
@@ -180,25 +186,29 @@ class FSBO(nn.Module):
     def test(self, val_batch):
         
         x_spt, x_qry, y_spt, y_qry = val_batch
+        done = False
+        try: 
+            z_spt = self.feature_extractor(x_spt).detach()
+            self.model.set_train_data(inputs=z_spt, targets=y_spt, strict=False)
 
-        z_spt = self.feature_extractor(x_spt).detach()
-        self.model.set_train_data(inputs=z_spt, targets=y_spt, strict=False)
+            self.model.eval()
+            self.feature_extractor.eval()
+            self.likelihood.eval()
 
-        self.model.eval()
-        self.feature_extractor.eval()
-        self.likelihood.eval()
-
-        with torch.no_grad():
-            z_qry = self.feature_extractor(x_qry).detach()
-            pred = self.likelihood(self.model(z_qry))
-            loss = -self.mll(pred, y_qry)
-
+            with torch.no_grad():
+                z_qry = self.feature_extractor(x_qry).detach()
+                pred = self.likelihood(self.model(z_qry))
+                loss = -self.mll(pred, y_qry)
+            
+            done = True
+        except Exception as e:
+            print(e)
 
         self.model.train()
         self.feature_extractor.train()
         self.likelihood.train()
 
-        return loss
+        return done, loss
 
     def save_checkpoint(self, checkpoint_path):
         # save state
