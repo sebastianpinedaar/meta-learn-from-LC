@@ -120,12 +120,16 @@ class Agent():
 
         if self.metatrained:
 
-            df = pd.DataFrame([self.dataset_meta_features])
-            df_numerical = np.array(df[self.numerical_dataset_metafeatures].astype(float))
-            df_categorical = df[self.categorical_dataset_metafeatures]
-            df_categorical = self.enc.transform(np.array(df_categorical))
-            dataset_features = np.concatenate([df_numerical, df_categorical.toarray()], axis=1)
-            self.dataset_features  = self.scaler.transform(dataset_features)
+            # df = pd.DataFrame([self.dataset_meta_features])
+            # df_numerical = np.array(df[self.numerical_dataset_metafeatures].astype(float))
+            # df_categorical = df[self.categorical_dataset_metafeatures]
+            # df_categorical = self.enc.transform(np.array(df_categorical))
+            # dataset_features = np.concatenate([df_numerical, df_categorical.toarray()], axis=1)
+            # self.dataset_features  = self.scaler.transform(dataset_features)
+
+            _, _, self.dataset_features, _ = self.prep_metafeatures(
+                {"0": dataset_meta_features}, self.enc, self.scaler, self.col_info
+            )
 
             d = distance_matrix(self.dataset_features, self.metatrain_dataset_features)
             self.most_similar_metatrain_dataset = self.index_dataset[np.argmin(d)]
@@ -142,6 +146,73 @@ class Agent():
         
         self.X_pre = torch.FloatTensor(self.X_pre).to(self.device)
 
+    def _one_hot_for_categoricals(self, data_cat):
+        enc = OneHotEncoder(handle_unknown="ignore", sparse=False)
+        enc.fit(data_cat)
+        return enc
+
+    def _scaling_for_numeric(self, data_num):
+        scaler = MinMaxScaler()
+        scaler.fit(data_num)
+        return scaler
+
+    def prep_metafeatures(self, dataset_meta_features, enc=None, scaler=None, col_info=None):
+        """ Function to apply some basic sanity checks and cleaning for metafeatures only
+
+        For the meta-training phase, enc, scaler and col_info passed should be None.
+        For the meta-testing phase, enc, scaler and col_info passed should be NOT be None.
+
+        Parameters
+        ----------
+        dataset_meta_features : dict
+
+        Returns
+        -------
+        OneHotEncoder object, object, np.array, dict
+        """
+
+        meta_f = pd.DataFrame.from_dict(dataset_meta_features).transpose().sort_index()
+        if col_info is None:
+            # finding columns with 0 variance
+            drop_cols = meta_f.columns[meta_f.nunique(axis=0) == 1].tolist()
+            # explicit hard-coded check to remove names from meta features
+            # expecting `name` to be a noisy, misleading feature that can blow up dimensionality
+            if "name" in meta_f.columns:
+                drop_cols.append("name")
+        else:
+            drop_cols = col_info["drop_cols"]
+        # dropping select columns
+        meta_f = meta_f.drop(labels=drop_cols, axis=1)
+        # enforcing type checks on columns by converting to numeric or strings
+        if col_info is None:
+            num_cols = []
+            cat_cols = []
+            for cols in meta_f.columns:
+                try:
+                    meta_f[cols] = meta_f[cols].astype(float)
+                    num_cols.append(cols)
+                except ValueError:
+                    meta_f[cols] = meta_f[cols].astype(str)
+                    cat_cols.append(cols)
+        else:
+            num_cols = col_info["num_cols"]
+            cat_cols = col_info["cat_cols"]
+        # subsetting meta features for numeric and categorical types
+        meta_f_num = meta_f[num_cols]
+        meta_f_cat = meta_f[cat_cols]
+        # obtaining transformed metafeatures
+        if enc is None:
+            enc = self._one_hot_for_categoricals(meta_f_cat)
+        data_cat = enc.transform(meta_f_cat)
+        if scaler is None:
+            scaler = self._scaling_for_numeric(meta_f_num)
+        data_num = scaler.transform(meta_f_num)
+        transformed_data = np.hstack((data_cat, data_num))
+
+        col_info = {"cat_cols": cat_cols, "num_cols": num_cols, "drop_cols": drop_cols}
+
+        return enc, scaler, transformed_data, col_info
+
     def process_data(self, dataset_meta_features, algorithms_meta_features, validation_learning_curves, test_learning_curves):
 
         """
@@ -152,20 +223,25 @@ class Agent():
         n_datasets = len(datasets)
         split = int(n_datasets*0.9)
 
-        train_data = {}
-        test_data =  {}
-
-        self.enc = OneHotEncoder(handle_unknown="ignore")
-        self.scaler = MinMaxScaler()
-
+        # preprocessing metafeatures
+        self.enc, self.scaler, self.metatrain_dataset_features, self.col_info = self.prep_metafeatures(dataset_meta_features)
         self.index_dataset = list(dataset_meta_features.keys())
-        df_dataset_features = pd.DataFrame(dataset_meta_features.values(), index=dataset_meta_features.keys())
-        df_numerical = np.array(df_dataset_features[self.numerical_dataset_metafeatures].astype(float))
-        df_categorical = df_dataset_features[self.categorical_dataset_metafeatures]
-        df_categorical = self.enc.fit_transform(np.array(df_categorical))
 
-        dataset_features = np.concatenate([df_numerical, df_categorical.toarray()], axis=1)
-        self.metatrain_dataset_features  = self.scaler.fit_transform(dataset_features)
+        train_data = {}
+        test_data = {}
+        #
+        # self.enc = OneHotEncoder(handle_unknown="ignore")
+        # self.scaler = MinMaxScaler()
+        #
+        # self.index_dataset = list(dataset_meta_features.keys())
+        # df_dataset_features = pd.DataFrame(dataset_meta_features.values(), index=dataset_meta_features.keys())
+        # df_numerical = np.array(df_dataset_features[self.numerical_dataset_metafeatures].astype(float))
+        # df_categorical = df_dataset_features[self.categorical_dataset_metafeatures]
+        # df_categorical = self.enc.fit_transform(np.array(df_categorical))
+        #
+        # dataset_features = np.concatenate([df_numerical, df_categorical.toarray()], axis=1)
+        # self.metatrain_dataset_features  = self.scaler.fit_transform(dataset_features)
+
         self.best_algorithm_per_dataset = {}
 
         X_time = []
@@ -186,35 +262,32 @@ class Agent():
             
             for algorithm, meta_features in algorithms_meta_features.items():
 
-
-                y_val+=validation_learning_curves[dataset][algorithm].scores.tolist()
-                y_test+=test_learning_curves[dataset][algorithm].scores.tolist()
+                y_val += validation_learning_curves[dataset][algorithm].scores.tolist()
+                y_test += test_learning_curves[dataset][algorithm].scores.tolist()
                 timestamps = validation_learning_curves[dataset][algorithm].timestamps
                 values = [float(x) for x in list(meta_features.values())]
                 ts_prev = 0
                 temp_y_val = validation_learning_curves[dataset][algorithm].scores.tolist()
-                X_best_time.append(values+temp_dataset_feat)
+                X_best_time.append(values + temp_dataset_feat)
                 y_best_time.append(timestamps[np.array(temp_y_val).argmax()])
 
-
                 for j, ts in enumerate(timestamps):
-                    X.append(values+temp_dataset_feat+[j,ts_prev/time_budget])
-                    X_time.append(values+temp_dataset_feat+[j,ts_prev/time_budget])
-                    y_time.append(ts-ts_prev)
+                    X.append(values + temp_dataset_feat + [j, ts_prev/time_budget])
+                    X_time.append(values + temp_dataset_feat + [j, ts_prev/time_budget])
+                    y_time.append(ts - ts_prev)
                     
                     ts_prev = ts
-                    
 
-                if self.best_algorithm_per_dataset[dataset]["perf_test"]<y_test[-1]:
-                    self.best_algorithm_per_dataset[dataset]["id_test"]=algorithm
-                    self.best_algorithm_per_dataset[dataset]["perf_test"]=y_test[-1]
+                if self.best_algorithm_per_dataset[dataset]["perf_test"] < y_test[-1]:
+                    self.best_algorithm_per_dataset[dataset]["id_test"] = algorithm
+                    self.best_algorithm_per_dataset[dataset]["perf_test"] = y_test[-1]
 
-                if self.best_algorithm_per_dataset[dataset]["perf_val"]<y_val[-1]:
-                    self.best_algorithm_per_dataset[dataset]["id_val"]=algorithm
-                    self.best_algorithm_per_dataset[dataset]["perf_val"]=y_val[-1]
+                if self.best_algorithm_per_dataset[dataset]["perf_val"] < y_val[-1]:
+                    self.best_algorithm_per_dataset[dataset]["id_val"] = algorithm
+                    self.best_algorithm_per_dataset[dataset]["perf_val"] = y_val[-1]
                 perf_hist.append([temp_y_val, timestamps.tolist()])
 
-            if i<split:
+            if i < split:
                 train_data[dataset] = {"X": X, "y_val": y_val, "y_test":y_test, "perf_hist":perf_hist}
             else:
                 test_data[dataset] = {"X": X, "y_val": y_val, "y_test":y_test, "perf_hist":perf_hist}

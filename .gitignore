@@ -1,6 +1,7 @@
-.idea/
-output/
-__pycache__/
+.idea
+output
+__pycache__
+scoring_program/__pycache__
 
 code_submission/gpytorch/*.pyc<
 code_submission/gpytorch/*/*.pyc
