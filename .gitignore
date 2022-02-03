@@ -1,1 +1,10 @@
 .idea/
+output/
+__pycache__/
+
+code_submission/gpytorch/*.pyc<
+code_submission/gpytorch/*/*.pyc
+code_submission/gpytorch/*/*/*.pyc
+code_submission/gpytorch/*/*/*/*.pyc
+
+
