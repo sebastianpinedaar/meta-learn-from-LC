@@ -119,14 +119,6 @@ class Agent():
 
 
         if self.metatrained:
-
-            # df = pd.DataFrame([self.dataset_meta_features])
-            # df_numerical = np.array(df[self.numerical_dataset_metafeatures].astype(float))
-            # df_categorical = df[self.categorical_dataset_metafeatures]
-            # df_categorical = self.enc.transform(np.array(df_categorical))
-            # dataset_features = np.concatenate([df_numerical, df_categorical.toarray()], axis=1)
-            # self.dataset_features  = self.scaler.transform(dataset_features)
-
             _, _, self.dataset_features, _ = self.prep_metafeatures(
                 {"0": dataset_meta_features}, self.enc, self.scaler, self.col_info
             )
@@ -229,18 +221,6 @@ class Agent():
 
         train_data = {}
         test_data = {}
-        #
-        # self.enc = OneHotEncoder(handle_unknown="ignore")
-        # self.scaler = MinMaxScaler()
-        #
-        # self.index_dataset = list(dataset_meta_features.keys())
-        # df_dataset_features = pd.DataFrame(dataset_meta_features.values(), index=dataset_meta_features.keys())
-        # df_numerical = np.array(df_dataset_features[self.numerical_dataset_metafeatures].astype(float))
-        # df_categorical = df_dataset_features[self.categorical_dataset_metafeatures]
-        # df_categorical = self.enc.fit_transform(np.array(df_categorical))
-        #
-        # dataset_features = np.concatenate([df_numerical, df_categorical.toarray()], axis=1)
-        # self.metatrain_dataset_features  = self.scaler.fit_transform(dataset_features)
 
         self.best_algorithm_per_dataset = {}
 
