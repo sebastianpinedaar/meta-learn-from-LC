@@ -32,7 +32,7 @@ class Agent():
         self.observed_cost = []
         #self.device =  torch.device("cuda" if torch.cuda.is_available() else "cpu")
         self.device = "cpu"
-        self.cost_model_type = "RF"
+        self.cost_model_type = "MLP"  #"RF"
         self.acquistion_type = "ei"
         #self.acquistion_type = "cost_balanced_ei"
         self.conf = {"kernel":"52", 
@@ -254,8 +254,10 @@ class Agent():
                 for j, ts in enumerate(timestamps):
                     X.append(values + temp_dataset_feat + [j, ts_prev/time_budget])
                     X_time.append(values + temp_dataset_feat + [j, ts_prev/time_budget])
+                    # cost model inputs:
+                    ## HPs, dataset meta features, last seen timestamp
+                    # X_time.append(values + temp_dataset_feat + [ts_prev])
                     y_time.append(ts - ts_prev)
-                    
                     ts_prev = ts
 
                 if self.best_algorithm_per_dataset[dataset]["perf_test"] < y_test[-1]:
@@ -271,7 +273,15 @@ class Agent():
                 train_data[dataset] = {"X": X, "y_val": y_val, "y_test":y_test, "perf_hist":perf_hist}
             else:
                 test_data[dataset] = {"X": X, "y_val": y_val, "y_test":y_test, "perf_hist":perf_hist}
-       
+
+        # shuffling cost data
+        X_time = np.array(X_time)
+        y_time = np.array(y_time)
+        idx = np.arange(X_time.shape[0])
+        np.random.shuffle(idx)
+        X_time = X_time[idx]
+        y_time = y_time[idx]
+
         return train_data, test_data, X_time, y_time, X_best_time, y_best_time, len(X[0])
 
 
@@ -320,15 +330,14 @@ class Agent():
         self.fsbo_model.train(epochs=self.meta_learning_epochs, n_batches=self.n_batches)
         
         if self.cost_model_type == "MLP":
-            self.cost_model = MLP(n_input = len(X_cost[0]),
-                                    n_hidden = self.n_hidden,
-                                    n_layers = self.n_layers,
-                                    n_output = 1).to(self.device)
+            self.cost_model = MLP(
+                n_input=len(X_cost[0]), n_hidden=self.n_hidden, n_layers=self.n_layers, n_output=1
+            ).to(self.device)
             y_cost = torch.FloatTensor(y_cost).to(self.device)
-            y_cost = torch.log(y_cost+1)
+            y_cost = torch.log(y_cost + 1)
             self.y_max_cost = torch.max(y_cost)
             X_cost = torch.FloatTensor(X_cost).to(self.device)
-            losses = self.train_cost_model(X_cost, y_cost, lr = 0.0001, epochs = 1000)
+            losses = self.train_cost_model(X_cost, y_cost, lr=0.0001, epochs=1000)
 
             torch.save(self.cost_model, "cost_model.pt")
         else:
@@ -341,30 +350,47 @@ class Agent():
 
         self.metatrained = 1
 
-    def train_cost_model (self,  X, y_cost, lr = 0.001, epochs = 100):
+    def custom_loss_fn(self, y_pred, y_true, alpha=-0.1):
+        # penalizing undershooting
+        l1 = y_pred - y_true
+        # penalizing overshooting
+        l2 = alpha * (l1)
+        loss = -torch.min(torch.hstack((l1, l2)), axis=1).values.mean()
+        return loss
 
-        optimizer = torch.optim.Adam(self.cost_model.parameters(), lr= lr)
-    
-        
-        y_cost /= self.y_max_cost
+    def train_cost_model (self,  X, y, lr=0.001, epochs=100, batch_size=64):
 
-        loss_fn = torch.nn.MSELoss()
+        optimizer = torch.optim.Adam(self.cost_model.parameters(), lr=lr)
+
+        y /= self.y_max_cost
+
+        loss_fn = self.custom_loss_fn  # torch.nn.MSELoss()
         losses = [np.inf]
-        
-        for epoch in range(epochs):
-            optimizer.zero_grad()
-            pred = self.cost_model(X)
-            loss = loss_fn(pred, y_cost.reshape(-1,1))
-            loss.backward()
-            optimizer.step()
-            losses.append(loss.detach().cpu().numpy().item())
 
-            if(losses[-1]<0.001):
+        from torch.utils.data import DataLoader
+        data = torch.hstack((X, y.reshape(y.shape[0], 1)))
+        dloader = DataLoader(data, batch_size=batch_size, shuffle=False)
+        per_epoch_loss = []
+        for epoch in range(epochs):
+            losses = []
+            for (idx, batch) in enumerate(dloader):
+                batch_x = batch[:, :-1]
+                batch_y = batch[:, -1]
+                optimizer.zero_grad()
+                pred = self.cost_model(batch_x)
+                loss = loss_fn(pred, batch_y.reshape(-1,1))
+                loss.backward()
+                optimizer.step()
+                losses.append(loss.detach().cpu().numpy().item())
+            # to ignore potential inf/nan as losses in mean computation
+            mean_loss = np.ma.masked_invalid(losses).mean()
+            per_epoch_loss.append(mean_loss)
+            print("Epoch {:>4}/{:>4}: loss={:.5f}".format(epoch + 1, epochs, mean_loss), end='\r')
+
+            if per_epoch_loss[-1] < 0.001:
                 break
 
-        return losses
-
-
+        return per_epoch_loss
 
     def suggest(self, observation):
         """
