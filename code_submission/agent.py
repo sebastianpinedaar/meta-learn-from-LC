@@ -331,9 +331,30 @@ class Agent():
         self.fsbo_model.train(epochs=1, n_batches=self.n_batches)
         
         if self.cost_model_type == "MLP":
-            self.cost_model = MLP(
-                n_input=len(X_cost[0]), n_hidden=self.n_hidden, n_layers=self.n_layers, n_output=1
-            ).to(self.device)
+            model_type = "base"
+            if model_type == "base":
+                arch = {
+                    "n_input": len(X_cost[0]),
+                    "n_hidden": self.n_hidden,
+                    "n_layers": self.n_layers,
+                    "n_output": 1,
+                    "dropout_rate": 0.0
+                }
+                train_hps = {"lr": 0.0001, "epochs": 1000, "batch_size": 512, "alpha": -0.1}
+            elif model_type == "hadi":
+                # Hadi's model
+                arch = {
+                    "n_input": len(X_cost[0]),
+                    "n_hidden": 441,
+                    "n_layers": 8,
+                    "n_output": 1,
+                    "dropout_rate": 0.0010000000000000002
+                }
+                train_hps = {"lr": 0.001, "epochs": 400, "batch_size": 64, "alpha": -0.018479149770895}
+            else:
+                raise ValueError("Model type not recognized!")
+            self.cost_model = MLP(**arch).to(self.device)
+
             y_cost = torch.FloatTensor(y_cost).to(self.device)
             self.y_max_cost = torch.max(y_cost)
             # y' = log(1 + (y/y_max))
@@ -342,7 +363,7 @@ class Agent():
             y_cost = torch.log(y_cost + 1)
             X_cost = torch.FloatTensor(X_cost).to(self.device)
             # losses = self.train_cost_model(X_cost, y_cost, lr=0.0001, epochs=1000)
-            losses = self.train_cost_model(X_cost, y_cost, lr=0.001, epochs=10)
+            losses = self.train_cost_model(X_cost, y_cost, **train_hps)  #lr=0.001, epochs=10)
 
             torch.save(self.cost_model, "cost_model.pt")
         else:
@@ -363,11 +384,11 @@ class Agent():
         loss = -torch.min(torch.hstack((l1, l2)), axis=1).values.mean()
         return loss
 
-    def train_cost_model (self,  X, y, lr=0.001, epochs=100, batch_size=512):
+    def train_cost_model (self,  X, y, lr=0.001, epochs=100, batch_size=512, alpha=-0.1):
 
         optimizer = torch.optim.Adam(self.cost_model.parameters(), lr=lr)
 
-        loss_fn = torch.nn.MSELoss()  # self.custom_loss_fn
+        loss_fn = self.custom_loss_fn  # torch.nn.MSELoss()
         losses = [np.inf]
 
         data = torch.hstack((X, y.reshape(y.shape[0], 1)))
@@ -380,7 +401,7 @@ class Agent():
                 batch_y = batch[:, -1]
                 optimizer.zero_grad()
                 pred = self.cost_model(batch_x)
-                loss = loss_fn(pred, batch_y.reshape(-1, 1))
+                loss = loss_fn(pred, batch_y.reshape(-1, 1), alpha)
                 loss.backward()
                 optimizer.step()
                 losses.append(loss.detach().cpu().numpy().item())
