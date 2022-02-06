@@ -7,6 +7,7 @@ from sys import path
 import os
 from fsbo import FSBO, MLP
 import torch
+from torch.utils.data import DataLoader
 from scipy.spatial import distance_matrix
 from scipy.stats import norm
 from sklearn.ensemble import RandomForestRegressor
@@ -116,7 +117,7 @@ class Agent():
         self.iter = 0
         self.time_budget = float(dataset_meta_features["time_budget"])
         self.max_trials = 3
-
+        self.observation_history = {"X": [], "y": [], "cost": []}
 
         if self.metatrained:
             _, _, self.dataset_features, _ = self.prep_metafeatures(
@@ -126,16 +127,15 @@ class Agent():
             d = distance_matrix(self.dataset_features, self.metatrain_dataset_features)
             self.most_similar_metatrain_dataset = self.index_dataset[np.argmin(d)]
             self.similar_datasets_sorted = np.argsort(d)
-            self.initial_alg_test_id= self.best_algorithm_per_dataset[self.most_similar_metatrain_dataset]["id_test"]
-            self.initial_alg_val_id= self.best_algorithm_per_dataset[self.most_similar_metatrain_dataset]["id_val"]
+            self.initial_alg_test_id = self.best_algorithm_per_dataset[self.most_similar_metatrain_dataset]["id_test"]
+            self.initial_alg_val_id = self.best_algorithm_per_dataset[self.most_similar_metatrain_dataset]["id_val"]
 
+        # pre-computed features for input vectors, already containing the HPs and metafeatures
         self.X_pre = []
-
         for alg_name in self.algorithms_list:
             alg = algorithms_meta_features[alg_name]
             hp = [float(x) for x in list(alg.values())]
-            self.X_pre.append(hp+self.dataset_features.tolist()[0])
-        
+            self.X_pre.append(hp + self.dataset_features.tolist()[0])
         self.X_pre = torch.FloatTensor(self.X_pre).to(self.device)
 
     def _one_hot_for_categoricals(self, data_cat):
@@ -326,18 +326,23 @@ class Agent():
 
         train_data, test_data, X_cost, y_cost, X_best, y_best, input_size = self.process_data(dataset_meta_features, algorithms_meta_features, validation_learning_curves, test_learning_curves)
         feature_extractor = MLP(input_size, n_hidden=self.n_hidden, n_layers=self.n_layers).to(self.device)        
-        self.fsbo_model = FSBO(train_data, test_data, feature_extractor=feature_extractor , conf=self.conf).to(self.device)
-        self.fsbo_model.train(epochs=self.meta_learning_epochs, n_batches=self.n_batches)
+        self.fsbo_model = FSBO(train_data, test_data, feature_extractor=feature_extractor, conf=self.conf).to(self.device)
+        # self.fsbo_model.train(epochs=self.meta_learning_epochs, n_batches=self.n_batches)
+        self.fsbo_model.train(epochs=1, n_batches=self.n_batches)
         
         if self.cost_model_type == "MLP":
             self.cost_model = MLP(
                 n_input=len(X_cost[0]), n_hidden=self.n_hidden, n_layers=self.n_layers, n_output=1
             ).to(self.device)
             y_cost = torch.FloatTensor(y_cost).to(self.device)
-            y_cost = torch.log(y_cost + 1)
             self.y_max_cost = torch.max(y_cost)
+            # y' = log(1 + (y/y_max))
+            # y = (exp(y') - 1) * y_max
+            y_cost /= self.y_max_cost
+            y_cost = torch.log(y_cost + 1)
             X_cost = torch.FloatTensor(X_cost).to(self.device)
-            losses = self.train_cost_model(X_cost, y_cost, lr=0.0001, epochs=1000)
+            # losses = self.train_cost_model(X_cost, y_cost, lr=0.0001, epochs=1000)
+            losses = self.train_cost_model(X_cost, y_cost, lr=0.001, epochs=10)
 
             torch.save(self.cost_model, "cost_model.pt")
         else:
@@ -358,16 +363,13 @@ class Agent():
         loss = -torch.min(torch.hstack((l1, l2)), axis=1).values.mean()
         return loss
 
-    def train_cost_model (self,  X, y, lr=0.001, epochs=100, batch_size=64):
+    def train_cost_model (self,  X, y, lr=0.001, epochs=100, batch_size=512):
 
         optimizer = torch.optim.Adam(self.cost_model.parameters(), lr=lr)
 
-        y /= self.y_max_cost
-
-        loss_fn = self.custom_loss_fn  # torch.nn.MSELoss()
+        loss_fn = torch.nn.MSELoss()  # self.custom_loss_fn
         losses = [np.inf]
 
-        from torch.utils.data import DataLoader
         data = torch.hstack((X, y.reshape(y.shape[0], 1)))
         dloader = DataLoader(data, batch_size=batch_size, shuffle=False)
         per_epoch_loss = []
@@ -378,7 +380,7 @@ class Agent():
                 batch_y = batch[:, -1]
                 optimizer.zero_grad()
                 pred = self.cost_model(batch_x)
-                loss = loss_fn(pred, batch_y.reshape(-1,1))
+                loss = loss_fn(pred, batch_y.reshape(-1, 1))
                 loss.backward()
                 optimizer.step()
                 losses.append(loss.detach().cpu().numpy().item())
@@ -391,6 +393,9 @@ class Agent():
                 break
 
         return per_epoch_loss
+
+    def _map_algo_index(self, index):
+        return self.algorithms_list[index]
 
     def suggest(self, observation):
         """
@@ -420,191 +425,152 @@ class Agent():
         >>> action
         (9, 9, 80)
         """
-        self.iter +=1
-        
+        self.iter += 1
 
-        if (observation is None):
-           
+        # first observation/iteration
+        if observation is None:
+            # initializing episode trackers
             self.time_used = 0
             self.observed_configs = []
             self.observed_response = []
             self.observed_cost = []
             self.predicted_cost = []
+            self.last_queried_cost = 0.0
             self.remaining_budget_counter = self.time_budget
+            self.per_algo_cost_tracker = {algo: [] for algo in self.algorithms_list}
+            self.is_success_last_cost = False
             a = None
-            b =  self.algorithms_list.index(self.initial_alg_val_id)
+            b = self.algorithms_list.index(self.initial_alg_val_id)
             initial_factor = 1.
-
-            algorithm_meta_feat = [float(x) for x in list(self.algorithms_meta_features[self.initial_alg_val_id].values())]
-            x = torch.FloatTensor(algorithm_meta_feat+self.dataset_features.tolist()[0] +[0,0]).to(self.device)
-
+            # loading hyperparameter/algorithm
+            algorithm_meta_feat = [
+                float(x) for x in list(
+                    self.algorithms_meta_features[self.initial_alg_val_id].values()
+                )
+            ]
+            # creating input vector for surrogates
+            X = algorithm_meta_feat + self.dataset_features.tolist()[0] + [0, 0]
+            # add observation to history
+            self.observation_history["X"].append(X)
+            self.observation_history["y"].append([0.0])
+            self.observation_history["cost"].append([0.0])
+            X = torch.FloatTensor(X).to(self.device)
+            # estimating cost to use
             if self.cost_model_type == "MLP":
-                c = (self.cost_model(x)*self.y_max_cost).item()
-            
+                c = ((torch.exp(self.cost_model(X)) - 1) * self.y_max_cost).item()
             else:
-                c = self.cost_model.predict(np.array(x).reshape(1,-1)).item()
-            
-            self.last_predicted_cost=np.exp(c)
-            c = np.exp(c+initial_factor).item()
-            self.remaining_budget_counter-=c
+                c = self.cost_model.predict(np.array(X).reshape(1, -1)).item()
+            self.last_predicted_cost = c  # np.exp(c)
+            # c = np.exp(c + initial_factor).item()
+            self.remaining_budget_counter -= c
+            suggestion = (a, b, min(c, self.remaining_budget_counter))
 
-            #c = self.best_cost_model.predict(np.array(x).reshape(1,-1)[:,:-2]).item()
-            
-            #X = [[float(x)  for x in list(self.algorithms_meta_features[self.algorithms_list[i]].values())]+self.dataset_features.tolist()[0]+[0,0] for i in range(self.nA)]
-            #pred_c = self.cost_model.predict(np.array(X))
-            #i = np.argmin(pred_c).item()
-            #b = i
-            #c = np.exp(pred_c[i]+initial_factor).item()
+            return suggestion
+            # return a,b,c
 
-            return a,b,min(c, self.time_budget/2)
-            #return a,b,c
+        # all observations from step 2 in the episode
+        algorithm_index, ts, y_val = observation
 
+        #############
+        # Section 1 #
+        #############
+        # Book-keeping of reported observation and updating variables
 
+        # flagging Success/Failure of previous query
+        # ts=0 if failed to match/overshoot next budget
+        if ts > 0:
+            self.is_success_last_cost = True
+            self.per_algo_cost_tracker[self._map_algo_index(algorithm_index)].append(ts)
+            self.algorithms_cost_count[algorithm_index] = ts
         else:
+            self.is_success_last_cost = False
 
+        # self.convergence keeps track of the algorithms that converged (=0) to omit them in EI
+        if y_val == self.validation_last_scores[algorithm_index] and y_val != 0:  # and ts==self.algorithms_cost_count[algorithm_index]:
+            self.convergence[algorithm_index] = 0
+        else:
+            self.validation_last_scores[algorithm_index] = y_val
 
-            algorithm_index, ts, y_val = observation
+        j_idx = len(
+            self.per_algo_cost_tracker[self._map_algo_index(algorithm_index)]
+        )
+        finetune = False
+        # record the observation when a query is successful to have data for finetuning
+        if self.is_success_last_cost:
+            # create vector from observation
+            algorithm_meta_feat = [
+                float(x) for x in list(self.algorithms_meta_features[self._map_algo_index(algorithm_index)].values())
+            ]
+            _ts = self.per_algo_cost_tracker[self._map_algo_index(algorithm_index)][-1]
+            X = algorithm_meta_feat + self.dataset_features.tolist()[0] + [j_idx, _ts / self.time_budget]
+            # add observation to history
+            self.observation_history["X"].append(X)
+            self.observation_history["y"].append([y_val])
+            self.observation_history["cost"].append([_ts])
 
+            finetune = True
 
-            #self.convergence keeps track of the algorithms that converged (=0) to omit them in EI
-            if y_val == self.validation_last_scores[algorithm_index]  and y_val !=0 :#and ts==self.algorithms_cost_count[algorithm_index]: 
-                self.convergence[algorithm_index]=0
-            else:
-                self.validation_last_scores[algorithm_index] = y_val
+        X = torch.FloatTensor(self.observation_history["X"]).to(self.device)
+        y = torch.FloatTensor(self.observation_history["y"]).to(self.device)
+        z = torch.FloatTensor(self.observation_history["cost"]).to(self.device)
+        if finetune:
+            _ = self.fsbo_model.finetuning(
+                X, y,
+                epochs=self.finetuning_epochs,
+                finetuning_lr=self.finetuning_lr,
+                patience=self.finetuning_patience
+            )
+            # _ = self.train_cost_model(X, z, lr=0.0001, epochs=50)
 
-            #self.trials -> how many times the algorithm has returned 0
-            #if y_val !=0:
-            #    self.trials[algorithm_index]=0           
-            #else:
-            #    self.trials[algorithm_index]+=1
-                
-            #self.count ->  budge count,  just increase when the algorithm did finished
-            if ts!=self.algorithms_cost_count[algorithm_index]:
-                self.count[algorithm_index]+=1
-                self.algorithms_perf_hist[algorithm_index].append([ts, y_val])
-                self.trials[algorithm_index]=0           
-            else:
-                self.trials[algorithm_index]+=1  
+        delta_t = 0.0
+        if not self.is_success_last_cost:
+            delta_t = self.last_predicted_cost
 
-                if self.trials[algorithm_index] == self.max_trials:
-                    self.convergence[algorithm_index]=0
+        # for all algorithms in list, predict next budget, compute EI for (\lambda, pred_cost) pairs
+        X_af = []
+        for i in range(self.nA):
+            _j = len(self.per_algo_cost_tracker[self._map_algo_index(i)])
+            try:
+                _ts = self.per_algo_cost_tracker[self._map_algo_index(i)][-1]
+            except IndexError:
+                _ts = 0.0
+            X_af.append(self.X_pre[i].cpu().detach().numpy().tolist() + [_j, _ts / self.time_budget])
+        # Altering the last seen timestamp if the last queried algo returned a blank for the query
+        _observed_algo = self.per_algo_cost_tracker[self._map_algo_index(algorithm_index)]
+        last_cost = _observed_algo[-1] if len(_observed_algo) else 0.0
+        X_af[algorithm_index][-1] = (last_cost + delta_t) / self.time_budget
+        X_af = torch.Tensor(X_af).to(self.device)
 
-            
-            #adds the new observation to the history
+        # predicting costs for the AF candidates
+        # y' = log(1 + (y/y_max))
+        # y = (exp(y') - 1) * y_max
+        pred_costs = ((torch.exp(self.cost_model(X_af)) - 1) * self.y_max_cost)
+        X_af[:, -1] = X_af[:, -1] + (pred_costs / self.time_budget).reshape(-1)
 
-            if  ts!=self.algorithms_cost_count[algorithm_index] or len(self.observed_configs)==0:
+        # compute acqusition function
+        best_y = max(self.observation_history["y"])
+        mean, std = self.fsbo_model.predict(X, y, X_af)
+        ei = torch.FloatTensor(self.EI(mean, std, best_y)).to(self.device)
 
-                algorithm = self.algorithms_list[algorithm_index]
-                j = self.count[algorithm_index]
-                algorithm_meta_feat = [float(x) for x in list(self.algorithms_meta_features[algorithm].values())]
+        # masks to avoid picking converged algorithms
+        ei = torch.multiply(ei, self.convergence)
 
-                self.observed_cost.append(ts-self.algorithms_cost_count[algorithm_index])
-                self.predicted_cost.append(self.last_predicted_cost)
-                self.algorithms_cost_count[algorithm_index] = ts
-                self.observed_configs.append(algorithm_meta_feat+self.dataset_features.tolist()[0]+[j, self.algorithms_cost_count[algorithm_index]/self.time_budget])
-                self.observed_response.append(y_val)
-                
-            
-            #finetune surrogate
-            x_spt = torch.FloatTensor(self.observed_configs).to(self.device)
-            y_spt = torch.FloatTensor(self.observed_response).to(self.device)
-            loss_history = self.fsbo_model.finetuning(x_spt,y_spt, epochs = self.finetuning_epochs, finetuning_lr = self.finetuning_lr, patience=self.finetuning_patience)
-            
-            x_qry = torch.concat((self.X_pre, self.count.reshape(-1,1), torch.FloatTensor(self.algorithms_cost_count).reshape(-1,1)/self.time_budget), axis=1)
+        if self.acquistion_type == "cost_balanced_ei":
+            ei = torch.divide(ei, pred_costs)
 
-            x = np.array(self.observed_configs)
-            y1 = np.log(np.array(self.observed_cost)+1)
-            y2 = np.log(np.array(self.predicted_cost)+1)
-            non_zero_id = np.where(y1!=0)[0]
-            n_observed = len(non_zero_id)
-            if n_observed>0:
-                neigh = KNeighborsRegressor(n_neighbors=min(5,n_observed))
-                neigh.fit(x[non_zero_id], y1[non_zero_id]-y2[non_zero_id])
-                y_correction_pred = neigh.predict(np.array(x_qry))
-            else:
-                y_correction_pred = np.zeros(x_qry.shape[0])
+        next_algorithm = torch.argmax(ei).item()
+        delta_t += pred_costs[next_algorithm].item()
+        self.last_predicted_cost = delta_t
+        a_star = np.argmax(self.validation_last_scores)
+        a = next_algorithm
+        self.remaining_budget_counter -= delta_t
+        suggestion = (a_star, a, delta_t)
 
+        return suggestion
 
-            #predicts cost
-            if self.cost_model_type == "MLP":
-                self.cost_model = torch.load("cost_model.pt")
-
-                
-                ##here: finetune##
-                x = torch.FloatTensor(self.observed_configs)
-                y =  torch.log(torch.FloatTensor(self.observed_cost)+1)
-                if (y!=0).sum() !=0:
-                    self.train_cost_model(x[y!=0],y[y!=0], epochs=50, lr=0.1)
-
-                y_pred_cost = self.cost_model(x_qry)*self.y_max_cost
-            else:
-   
-            
-                y_pred_cost = self.cost_model.predict(np.array(x_qry)) #+ y_correction_pred*(1-self.remaining_budget_counter/self.time_budget)
-                y_pred_cost = torch.FloatTensor(y_pred_cost)
-
-
-
-            #y_pred_cost_2 = self.best_cost_model.predict(x_qry[:,:-2])
-
-            #second prediction
-
-            
-            #compute acqusition function
-            best_y =max(self.observed_response)
-            mean, std = self.fsbo_model.predict(x_spt,y_spt, x_qry) 
-            ei = torch.FloatTensor(self.EI(mean,std, best_y)).to(self.device)
-
-            #masks to avoid picking converged algorithms
-            ei = torch.multiply(ei, self.convergence)
-
-            if self.acquistion_type == "cost_balanced_ei":
-                ei = torch.divide(ei, y_pred_cost)
-
-            #formats the output
-
-            if self.iter <= self.n_init:
-                d = self.similar_datasets_sorted[0][self.iter]
-                next_algrithm_name = self.best_algorithm_per_dataset[self.index_dataset[d]]["id_val"]
-                next_algorithm = self.algorithms_list.index(next_algrithm_name)
-
-                algorithm_meta_feat = [float(x) for x in list(self.algorithms_meta_features[next_algrithm_name].values())]
-                x = torch.FloatTensor(algorithm_meta_feat+self.dataset_features.tolist()[0] +[0,0]).to(self.device)
-               
-                b = next_algorithm
-
-                if self.cost_model_type == "MLP":
-                    c = (self.cost_model(x)*self.y_max_cost).item()
-                else:
-                    c = self.cost_model.predict(np.array(x).reshape(1,-1)).item()
-                c = np.exp(c).item()
-                self.last_predicted_cost = c
-                self.predicted_cost.append(c)
-                    
-            else:
-
-                #norm_y = 1-y_pred_cost/np.log(1+self.remaining_budget_counter).item() 
-                #ei2 = torch.multiply(norm_y, ei)
-   
-                next_algorithm = torch.argmax(ei).item()
-                c = y_pred_cost[next_algorithm].item()
-                self.last_predicted_cost = np.exp(c).item()
-                c = np.exp(self.trials[next_algorithm]+c).item()
-                b = next_algorithm
-
-            #if self.count[next_algorithm] == 0:
-            #    c = y_pred_cost_2[next_algorithm].item()
-
-            a = np.argmax(self.validation_last_scores)
-            self.remaining_budget_counter-=c
-            
-            return a,b, c
-
-    def EI(self, mean, sigma, best_f, epsilon = 0):
-
-
+    def EI(self, mean, sigma, best_f, epsilon=0):
         with np.errstate(divide='warn'):
-            imp = mean -best_f - epsilon
+            imp = mean - best_f - epsilon
             Z = imp / sigma
             ei = imp * norm.cdf(Z) + sigma * norm.pdf(Z)
             ei[sigma == 0.0] = 0.0

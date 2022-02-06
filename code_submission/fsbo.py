@@ -105,7 +105,6 @@ class FSBO(nn.Module):
 
         return x, y
 
-
     def get_val_batch(self, task):
 
         tasks  = list(self.train_data.keys())  
@@ -124,7 +123,6 @@ class FSBO(nn.Module):
 
         return x_spt, x_qry, y_spt, y_qry
 
-
     def get_model_likelihood_mll(self, train_size):
         train_x=torch.ones(train_size, self.feature_extractor.out_features).to(self.device)
         train_y=torch.ones(train_size).to(self.device)
@@ -133,15 +131,12 @@ class FSBO(nn.Module):
 
         self.model = model.to(self.device)
         self.likelihood = likelihood.to(self.device)
-        self.mll        = gpytorch.mlls.ExactMarginalLogLikelihood(likelihood, model).to(self.device)
-    
+        self.mll = gpytorch.mlls.ExactMarginalLogLikelihood(likelihood, model).to(self.device)
 
     def train(self, epochs = 10, n_batches=100):
         
         best_loss = np.inf
-        
         val_losses = []
-
         for epoch in range(epochs):
             optimizer = torch.optim.Adam(self.parameters(), lr= self.lr)
             scheduler = self.scheduler_fn(optimizer, n_batches)
@@ -180,7 +175,6 @@ class FSBO(nn.Module):
                 best_loss = val_losses[-1]
                 self.save_checkpoint(self.model_path)
 
-            
     def test(self, val_batch):
         
         x_spt, x_qry, y_spt, y_qry = val_batch
@@ -221,7 +215,6 @@ class FSBO(nn.Module):
         self.likelihood.load_state_dict(ckpt['likelihood'])
         self.feature_extractor.load_state_dict(ckpt['net'])
 
-
     def finetuning(self, x, y, epochs=10, patience=10, finetuning_lr = 0.01, tol=0.0001):
 
         best_loss = np.inf
@@ -233,7 +226,7 @@ class FSBO(nn.Module):
         self.feature_extractor.train()
         self.likelihood.train()
 
-        optimizer = torch.optim.Adam(self.parameters(), lr= finetuning_lr)
+        optimizer = torch.optim.Adam(self.parameters(), lr=finetuning_lr)
         losses = [np.inf]
 
 
@@ -280,7 +273,8 @@ class FSBO(nn.Module):
 
         with torch.no_grad():
             z_qry = self.feature_extractor(x_qry)
-            pred = self.likelihood(self.model(z_qry))
+            _temp = self.model(z_qry)
+            pred = self.likelihood(_temp)
 
         mu = pred.mean.detach().to("cpu").numpy().reshape(-1,)
         stddev = pred.stddev.detach().to("cpu").numpy().reshape(-1,)
