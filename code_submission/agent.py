@@ -335,12 +335,12 @@ class Agent():
             if model_type == "base":
                 arch = {
                     "n_input": len(X_cost[0]),
-                    "n_hidden": self.n_hidden,
-                    "n_layers": self.n_layers,
+                    "n_hidden": 100,  # self.n_hidden,
+                    "n_layers": 2,  # self.n_layers,
                     "n_output": 1,
                     "dropout_rate": 0.0
                 }
-                train_hps = {"lr": 0.0001, "epochs": 1000, "batch_size": 512, "alpha": -0.1}
+                train_hps = {"lr": 0.001, "epochs": 100, "batch_size": 64, "alpha": -0.1}
             elif model_type == "hadi":
                 # Hadi's model
                 arch = {
@@ -377,6 +377,7 @@ class Agent():
         self.metatrained = 1
 
     def custom_loss_fn(self, y_pred, y_true, alpha=-0.1):
+        # Hadi: out = -torch.minimum(alpha*(target-input),target-input)
         # penalizing undershooting
         l1 = y_pred - y_true
         # penalizing overshooting
@@ -551,7 +552,7 @@ class Agent():
         X_af = []
         for i in range(self.nA):
             _j = len(self.per_algo_cost_tracker[self._map_algo_index(i)])
-            try:
+            try:  # fails if list is empty
                 _ts = self.per_algo_cost_tracker[self._map_algo_index(i)][-1]
             except IndexError:
                 _ts = 0.0
@@ -570,7 +571,7 @@ class Agent():
 
         # compute acqusition function
         best_y = max(self.observation_history["y"])
-        mean, std = self.fsbo_model.predict(X, y, X_af)
+        mean, std = self.fsbo_model.predict(X, y.reshape(-1), X_af)
         ei = torch.FloatTensor(self.EI(mean, std, best_y)).to(self.device)
 
         # masks to avoid picking converged algorithms
@@ -581,10 +582,15 @@ class Agent():
 
         next_algorithm = torch.argmax(ei).item()
         delta_t += pred_costs[next_algorithm].item()
-        self.last_predicted_cost = delta_t
         a_star = np.argmax(self.validation_last_scores)
         a = next_algorithm
         self.remaining_budget_counter -= delta_t
+
+        # TODO: fix or debug negative time predictions
+        # if delta_t < 0:
+        delta_t = np.clip(delta_t, a_min=50, a_max=max((delta_t, self.remaining_budget_counter/2.0)))
+        self.last_predicted_cost = delta_t
+
         suggestion = (a_star, a, delta_t)
 
         return suggestion

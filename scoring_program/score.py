@@ -308,10 +308,10 @@ if __name__ == "__main__":
         test_data_dir = os.path.join(input_dir, 'test')
         meta_features_dir = os.path.join(input_dir, 'dataset_meta_features')
         algorithms_meta_features_dir = os.path.join(input_dir, 'algorithms_meta_features')
-        output_from_ingestion_program_dir = output_dir # Output from the ingestion_program
         if len(argv) == 2:
             output_dir = os.path.join(default_output_dir, "{}".format(argv[-1]))
             print(output_dir)
+        output_from_ingestion_program_dir = output_dir # Output from the ingestion_program
     else:
         input_dir = os.path.abspath(argv[1])
         output_dir = os.path.abspath(argv[2])
@@ -394,7 +394,8 @@ if __name__ == "__main__":
 
     #=== Compute average final score and average ALC
     average_final_score = sum(list_final_score) / len(list_final_score)
-    average_alc = sum(list_alc) / len(list_alc)
+    # TODO: fix dataset 27 for nan ALC
+    average_alc = np.nansum(list_alc) / len(list_alc)
 
     #=== Write scores.html
     write_scores_html(output_dir, output_visualizations_dir)

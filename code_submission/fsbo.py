@@ -38,7 +38,7 @@ class MLP(nn.Module):
 
         self.relu = nn.ReLU()    
         
-    def forward(self,x):
+    def forward(self, x):
         x = self.hidden[0](x)
         for i in range(1, self.n_layers-1):
             
@@ -49,7 +49,6 @@ class MLP(nn.Module):
                 x = self.dropout[i-1](x)
             x = self.hidden[i](x)
         out = self.hidden[-1](self.relu(x))
-
         return out
 
 
