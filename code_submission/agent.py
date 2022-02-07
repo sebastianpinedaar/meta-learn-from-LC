@@ -1,5 +1,7 @@
 from functools import lru_cache
 import random
+from sqlite3 import enable_shared_cache
+import time
 import numpy as np
 import pandas as pd
 from sklearn.preprocessing import OneHotEncoder, MinMaxScaler
@@ -41,14 +43,15 @@ class Agent():
                     "device": self.device, 
                     "context_size": 10, 
                     "lr":0.05, 
-                    "loss_tol": 0.001}
+                    "loss_tol": 0.001,
+                    "use_perf_hist": False}
 
         self.meta_learning_epochs = 5
         self.finetuning_lr = 0.01
         self.finetuning_epochs = 10
         self.finetuning_patience = 100
         self.n_hidden = 10
-        self.n_layers = 2
+        self.n_layers = 3
         self.n_batches = 1000
         self.n_init = 1
         self.bias = 0
@@ -230,6 +233,8 @@ class Agent():
         X_best_time = []
         y_best_time = []
 
+        x_first_time = []
+
         for i, dataset in enumerate(datasets):
             X =[]
             y_val = []
@@ -239,38 +244,81 @@ class Agent():
             self.best_algorithm_per_dataset[dataset] = {"id_test":0, "perf_test":0, "id_val":0, "perf_val":0}
             idx = self.index_dataset.index(dataset)
             temp_dataset_feat = self.metatrain_dataset_features[idx].tolist()
-            
+            temp_x_first_time = []
+
             for algorithm, meta_features in algorithms_meta_features.items():
 
-                y_val += validation_learning_curves[dataset][algorithm].scores.tolist()
-                y_test += test_learning_curves[dataset][algorithm].scores.tolist()
                 timestamps = validation_learning_curves[dataset][algorithm].timestamps
                 values = [float(x) for x in list(meta_features.values())]
-                ts_prev = 0
+                ts_prev = [0]
+                val_prev = [0]
                 temp_y_val = validation_learning_curves[dataset][algorithm].scores.tolist()
+                temp_y_test = test_learning_curves[dataset][algorithm].scores.tolist()
                 X_best_time.append(values + temp_dataset_feat)
                 y_best_time.append(timestamps[np.array(temp_y_val).argmax()])
+                temp_x_first_time.append((values, float(timestamps[0])/time_budget, temp_y_val[0]))
 
                 for j, ts in enumerate(timestamps):
-                    X.append(values + temp_dataset_feat + [j, ts_prev/time_budget])
-                    X_time.append(values + temp_dataset_feat + [j, ts_prev/time_budget])
-                    y_time.append(ts - ts_prev)
+
                     
-                    ts_prev = ts
+                    for k in range(j, len(timestamps)):
+                        ts2 = timestamps[k]
+
+                        
+                        #X.append(values + temp_dataset_feat + [j, ts_prev/time_budget, (ts2-ts_prev)/time_budget, val_prev])
+                        if self.conf["use_perf_hist"]:
+                            X.append(values + temp_dataset_feat + [j, (ts2/time_budget-ts_prev[-1])])
+                        else:
+                            #X.append(values + temp_dataset_feat + [j, ts_prev[-1], ts2/time_budget-ts_prev[-1], val_prev[-1]])
+                            X.append(values + temp_dataset_feat + [j, ts_prev[-1], ts2/time_budget-ts_prev[-1]])
+
+                        y_val.append(temp_y_val[k])
+                        y_test.append(temp_y_test[k])
+                        perf_hist.append([ts_prev.copy(), val_prev.copy()])
+
+
+                    #X.append(values + temp_dataset_feat + [j, ts_prev/time_budget])
+                    X_time.append(values + temp_dataset_feat + [j, ts_prev[-1]])
+                    y_time.append(ts - ts_prev[-1]*time_budget)  
+
+                    ts_prev.append(ts/time_budget)
+                    val_prev.append(y_val[j])
+
+                  
+
+                    #val_prev = y_val[j]
 
                 if self.best_algorithm_per_dataset[dataset]["perf_test"] < y_test[-1]:
                     self.best_algorithm_per_dataset[dataset]["id_test"] = algorithm
                     self.best_algorithm_per_dataset[dataset]["perf_test"] = y_test[-1]
 
-                if self.best_algorithm_per_dataset[dataset]["perf_val"] < y_val[-1]:
+                #if self.best_algorithm_per_dataset[dataset]["perf_val"] < y_val[-1]:
+                #    self.best_algorithm_per_dataset[dataset]["id_val"] = algorithm
+                #    self.best_algorithm_per_dataset[dataset]["perf_val"] = y_val[-1]
+
+
+                if self.best_algorithm_per_dataset[dataset]["perf_val"] < temp_y_val[0]/(timestamps[0]+1):
                     self.best_algorithm_per_dataset[dataset]["id_val"] = algorithm
-                    self.best_algorithm_per_dataset[dataset]["perf_val"] = y_val[-1]
-                perf_hist.append([temp_y_val, timestamps.tolist()])
+                    self.best_algorithm_per_dataset[dataset]["perf_val"] = temp_y_val[0]/(timestamps[0]+1)
+
+
+            future_tensor = []
+
+            if self.conf["use_perf_hist"]:
+                for conf in perf_hist:
+                    future_tensor.append([])
+                    for j, (x_j, y_j) in enumerate(zip(conf[0], conf[1])):
+                        future_tensor[-1].append([x_j, y_j])
+
+                    #assuming max_length = 9
+                    for z in range(j,10):
+                        future_tensor[-1].append([0,0])
+
 
             if i < split:
-                train_data[dataset] = {"X": X, "y_val": y_val, "y_test":y_test, "perf_hist":perf_hist}
+                train_data[dataset] = {"X": X, "y_val": y_val, "y_test":y_test, "perf_hist":future_tensor, "x_first":temp_x_first_time, "meta_feat":temp_dataset_feat}
             else:
-                test_data[dataset] = {"X": X, "y_val": y_val, "y_test":y_test, "perf_hist":perf_hist}
+                test_data[dataset] = {"X": X, "y_val": y_val, "y_test":y_test, "perf_hist":future_tensor, "x_first": temp_x_first_time, "meta_feat":temp_dataset_feat}
        
         return train_data, test_data, X_time, y_time, X_best_time, y_best_time, len(X[0])
 
@@ -315,7 +363,8 @@ class Agent():
         self.test_learning_curves = test_learning_curves
 
         train_data, test_data, X_cost, y_cost, X_best, y_best, input_size = self.process_data(dataset_meta_features, algorithms_meta_features, validation_learning_curves, test_learning_curves)
-        feature_extractor = MLP(input_size, n_hidden=self.n_hidden, n_layers=self.n_layers).to(self.device)        
+        feature_extractor = MLP(input_size, n_hidden=self.n_hidden, n_layers=self.n_layers,
+                                     use_cnn = self.conf["use_perf_hist"]).to(self.device)        
         self.fsbo_model = FSBO(train_data, test_data, feature_extractor=feature_extractor , conf=self.conf).to(self.device)
         self.fsbo_model.train(epochs=self.meta_learning_epochs, n_batches=self.n_batches)
         
@@ -333,8 +382,8 @@ class Agent():
             torch.save(self.cost_model, "cost_model.pt")
         else:
             self.cost_model = RandomForestRegressor(max_depth=50)
-            y_target = np.log(np.array(y_cost)+1)
-            self.cost_model.fit(np.array(X_cost), y_target)
+            y_cost = np.log(np.array(y_cost)+1)
+            self.cost_model.fit(np.array(X_cost), y_cost)
 
         self.best_cost_model = RandomForestRegressor(n_estimators=10)
         self.best_cost_model.fit(np.array(X_best), np.array(y_best))
@@ -405,9 +454,12 @@ class Agent():
             self.observed_cost = []
             self.predicted_cost = []
             self.remaining_budget_counter = self.time_budget
+            self.algorithms_perf_hist = torch.zeros(self.nA,2,11)
+            self.observed_lc = []
+            self.count = torch.zeros(self.nA).to(self.device)
             a = None
             b =  self.algorithms_list.index(self.initial_alg_val_id)
-            initial_factor = 1.
+            initial_factor = 1
 
             algorithm_meta_feat = [float(x) for x in list(self.algorithms_meta_features[self.initial_alg_val_id].values())]
             x = torch.FloatTensor(algorithm_meta_feat+self.dataset_features.tolist()[0] +[0,0]).to(self.device)
@@ -417,6 +469,7 @@ class Agent():
             
             else:
                 c = self.cost_model.predict(np.array(x).reshape(1,-1)).item()
+                #c = np.log(c+1)
             
             self.last_predicted_cost=np.exp(c)
             c = np.exp(c+initial_factor).item()
@@ -430,7 +483,7 @@ class Agent():
             #b = i
             #c = np.exp(pred_c[i]+initial_factor).item()
 
-            return a,b,min(c, self.time_budget/2)
+            return a,b,min(c, self.time_budget*0.99)
             #return a,b,c
 
 
@@ -443,7 +496,9 @@ class Agent():
             #self.convergence keeps track of the algorithms that converged (=0) to omit them in EI
             if y_val == self.validation_last_scores[algorithm_index]  and y_val !=0 :#and ts==self.algorithms_cost_count[algorithm_index]: 
                 self.convergence[algorithm_index]=0
+                prev_score = y_val
             else:
+                prev_score = self.validation_last_scores[algorithm_index] 
                 self.validation_last_scores[algorithm_index] = y_val
 
             #self.trials -> how many times the algorithm has returned 0
@@ -455,7 +510,6 @@ class Agent():
             #self.count ->  budge count,  just increase when the algorithm did finished
             if ts!=self.algorithms_cost_count[algorithm_index]:
                 self.count[algorithm_index]+=1
-                self.algorithms_perf_hist[algorithm_index].append([ts, y_val])
                 self.trials[algorithm_index]=0           
             else:
                 self.trials[algorithm_index]+=1  
@@ -470,33 +524,71 @@ class Agent():
 
                 algorithm = self.algorithms_list[algorithm_index]
                 j = self.count[algorithm_index]
+                prev_ts = self.algorithms_cost_count[algorithm_index]
                 algorithm_meta_feat = [float(x) for x in list(self.algorithms_meta_features[algorithm].values())]
-
                 self.observed_cost.append(ts-self.algorithms_cost_count[algorithm_index])
                 self.predicted_cost.append(self.last_predicted_cost)
+
+                if self.conf["use_perf_hist"]:
+                    self.observed_configs.append(algorithm_meta_feat+self.dataset_features.tolist()[0]+[j, (ts-prev_ts)/self.time_budget])
+                else:
+                    #self.observed_configs.append(algorithm_meta_feat+self.dataset_features.tolist()[0]+[j, prev_ts/self.time_budget, (ts-prev_ts)/self.time_budget, prev_score])
+                    self.observed_configs.append(algorithm_meta_feat+self.dataset_features.tolist()[0]+[j, prev_ts/self.time_budget, (ts-prev_ts)/self.time_budget])
+
+                self.algorithms_perf_hist[algorithm_index,:,int(j.item())] = torch.FloatTensor([prev_ts, prev_score])
+                self.observed_lc.append(self.algorithms_perf_hist[algorithm_index].tolist())
                 self.algorithms_cost_count[algorithm_index] = ts
-                self.observed_configs.append(algorithm_meta_feat+self.dataset_features.tolist()[0]+[j, self.algorithms_cost_count[algorithm_index]/self.time_budget])
                 self.observed_response.append(y_val)
                 
-            
+            current_time = torch.FloatTensor(self.algorithms_cost_count).reshape(-1,1)/self.time_budget
+            last_scores = torch.FloatTensor(self.validation_last_scores).reshape(-1,1)
+            best_time_pred = self.best_cost_model.predict(np.array(self.X_pre))/self.time_budget
+
+            best_time_pred = torch.FloatTensor(best_time_pred).reshape(-1,1) 
+            time_to_best  = torch.min(best_time_pred, torch.FloatTensor([self.remaining_budget_counter/self.time_budget]))  - current_time
             #finetune surrogate
             x_spt = torch.FloatTensor(self.observed_configs).to(self.device)
             y_spt = torch.FloatTensor(self.observed_response).to(self.device)
-            loss_history = self.fsbo_model.finetuning(x_spt,y_spt, epochs = self.finetuning_epochs, finetuning_lr = self.finetuning_lr, patience=self.finetuning_patience)
-            
-            x_qry = torch.concat((self.X_pre, self.count.reshape(-1,1), torch.FloatTensor(self.algorithms_cost_count).reshape(-1,1)/self.time_budget), axis=1)
 
-            x = np.array(self.observed_configs)
-            y1 = np.log(np.array(self.observed_cost)+1)
-            y2 = np.log(np.array(self.predicted_cost)+1)
-            non_zero_id = np.where(y1!=0)[0]
-            n_observed = len(non_zero_id)
-            if n_observed>0:
-                neigh = KNeighborsRegressor(n_neighbors=min(5,n_observed))
-                neigh.fit(x[non_zero_id], y1[non_zero_id]-y2[non_zero_id])
-                y_correction_pred = neigh.predict(np.array(x_qry))
+            if self.conf["use_perf_hist"]:
+                w_spt = torch.FloatTensor(self.observed_lc).to(self.device)
+                x_qry = torch.concat((self.X_pre, 
+                    self.count.reshape(-1,1), 
+                    time_to_best),
+                    axis=1)
+
+                w_qry = self.algorithms_perf_hist
+
             else:
-                y_correction_pred = np.zeros(x_qry.shape[0])
+                w_spt = None
+                w_qry = None
+                x_qry = torch.concat((self.X_pre, 
+                    self.count.reshape(-1,1), 
+                    current_time,
+                    time_to_best),
+                    #last_scores), 
+                    axis=1)
+
+            x_qry2 = torch.concat((self.X_pre, 
+                self.count.reshape(-1,1), 
+                current_time), 
+                axis=1)
+            loss_history = self.fsbo_model.finetuning(x_spt,y_spt, w_spt, epochs = self.finetuning_epochs, finetuning_lr = self.finetuning_lr, patience=self.finetuning_patience)
+            
+
+
+
+            #x = np.array(self.observed_configs)
+            #y1 = np.log(np.array(self.observed_cost)+1)
+            #y2 = np.log(np.array(self.predicted_cost)+1)
+            #non_zero_id = np.where(y1!=0)[0]
+            #n_observed = len(non_zero_id)
+            #if n_observed>0:
+            #    neigh = KNeighborsRegressor(n_neighbors=min(5,n_observed))
+            #    neigh.fit(x[non_zero_id], y1[non_zero_id]-y2[non_zero_id])
+            #    y_correction_pred = neigh.predict(np.array(x_qry))
+            #else:
+            #    y_correction_pred = np.zeros(x_qry.shape[0])
 
 
             #predicts cost
@@ -510,11 +602,12 @@ class Agent():
                 if (y!=0).sum() !=0:
                     self.train_cost_model(x[y!=0],y[y!=0], epochs=50, lr=0.1)
 
-                y_pred_cost = self.cost_model(x_qry)*self.y_max_cost
+                y_pred_cost = self.cost_model(x_qry2)*self.y_max_cost
             else:
    
             
-                y_pred_cost = self.cost_model.predict(np.array(x_qry)) #+ y_correction_pred*(1-self.remaining_budget_counter/self.time_budget)
+                y_pred_cost = self.cost_model.predict(np.array(x_qry2)) #+ y_correction_pred*(1-self.remaining_budget_counter/self.time_budget)
+                #y_pred_cost = np.log(y_pred_cost+1)
                 y_pred_cost = torch.FloatTensor(y_pred_cost)
 
 
@@ -526,7 +619,7 @@ class Agent():
             
             #compute acqusition function
             best_y =max(self.observed_response)
-            mean, std = self.fsbo_model.predict(x_spt,y_spt, x_qry) 
+            mean, std = self.fsbo_model.predict(x_spt,y_spt, x_qry, w_spt, w_qry) 
             ei = torch.FloatTensor(self.EI(mean,std, best_y)).to(self.device)
 
             #masks to avoid picking converged algorithms
