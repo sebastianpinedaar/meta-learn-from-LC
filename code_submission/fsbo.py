@@ -127,6 +127,7 @@ class FSBO(nn.Module):
         self.get_model_likelihood_mll(self.context_size)
         self.training_tasks = list(train_data.keys())
         self.validation_tasks = list(validation_data.keys())
+        self.use_perf_hist = conf.get("use_perf_hist", True)
 
     def get_train_batch(self):
 
