@@ -393,7 +393,7 @@ class Agent():
                     "dropout_rate": 0.0,
                     "use_cnn": False
                 }
-                train_hps = {"lr": 0.001, "epochs": 100, "batch_size": 64, "alpha": -0.1}
+                train_hps = {"lr": 0.001, "epochs": 400, "batch_size": 64, "alpha": -0.1}
             elif model_type == "hadi":
                 # Hadi's model
                 arch = {
