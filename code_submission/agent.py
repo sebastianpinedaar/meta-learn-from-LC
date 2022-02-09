@@ -446,8 +446,7 @@ class Agent():
         return loss
 
     def train_cost_model (self,  X, y, lr=0.001, epochs=100, batch_size=512, alpha=-0.1):
-	writer = SummaryWriter()
-
+        writer = SummaryWriter()
         optimizer = torch.optim.Adam(self.cost_model.parameters(), lr=lr)
 
         loss_fn = self.custom_loss_fn  # torch.nn.MSELoss()
