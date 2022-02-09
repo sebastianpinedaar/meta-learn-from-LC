@@ -15,9 +15,6 @@ from scipy.stats import norm
 from sklearn.ensemble import RandomForestRegressor
 from sklearn.neighbors import KNeighborsRegressor
 
-import torch
-from torch.utils.tensorboard import SummaryWriter
-
 
 class Agent():
     def __init__(self, number_of_algorithms):
@@ -446,25 +443,16 @@ class Agent():
         return loss
 
     def train_cost_model (self,  X, y, lr=0.001, epochs=100, batch_size=512, alpha=-0.1):
-        writer = None  # SummaryWriter()
         optimizer = torch.optim.Adam(self.cost_model.parameters(), lr=lr)
 
         loss_fn = self.custom_loss_fn  # torch.nn.MSELoss()
         losses = [np.inf]
 
         data = torch.hstack((X, y.reshape(y.shape[0], 1)))
-
-        tr_size = 0.7 if writer is not None else 1.0
-        idx = int(tr_size * len(data))
-        D_tr = data[:idx]
-        D_val = data[-(len(data) - idx):]
-
-        dloader = DataLoader(D_tr, batch_size=batch_size, shuffle=False)
+        dloader = DataLoader(data, batch_size=batch_size, shuffle=False)
         per_epoch_loss = []
         for epoch in range(epochs):
             losses = []
-            tracker = []
-            val_tracker = []
             for (idx, batch) in enumerate(dloader):
                 batch_x = batch[:, :-1]
                 batch_y = batch[:, -1]
@@ -474,25 +462,13 @@ class Agent():
                 loss.backward()
                 optimizer.step()
                 losses.append(loss.detach().cpu().numpy().item())
-                # analyzing
-                tracker.extend((pred.reshape(-1) - batch_y.reshape(-1)).detach().cpu().numpy().tolist())
             # to ignore potential inf/nan as losses in mean computation
             mean_loss = np.ma.masked_invalid(losses).mean()
             per_epoch_loss.append(mean_loss)
             print("Epoch {:>4}/{:>4}: loss={:.5f}".format(epoch + 1, epochs, mean_loss), end='\r')
-            # prediction on the validation set for an epoch
-            if writer is not None:
-                with torch.no_grad():
-                    val_pred = self.cost_model(D_val[:, :-1])
-                    val_tracker = (
-                            val_pred.reshape(-1) - D_val[:, -1].reshape(-1)
-                    ).detach().cpu().numpy().tolist()
-                self._log_writer(writer, epoch+1, mean_loss, tracker, val_tracker)
 
             if per_epoch_loss[-1] < 0.001:
                 break
-        if writer is not None:
-            writer.close()
 
         return per_epoch_loss
 
