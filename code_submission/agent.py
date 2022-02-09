@@ -1,5 +1,7 @@
 from functools import lru_cache
 import random
+from sqlite3 import enable_shared_cache
+import time
 import numpy as np
 import pandas as pd
 from sklearn.preprocessing import OneHotEncoder, MinMaxScaler
@@ -46,7 +48,8 @@ class Agent():
                     "device": self.device, 
                     "context_size": 10, 
                     "lr":0.05, 
-                    "loss_tol": 0.001}
+                    "loss_tol": 0.001,
+                    "use_perf_hist": False}
 
         self.meta_learning_epochs = 5
         self.finetuning_lr = 0.01
@@ -217,10 +220,11 @@ class Agent():
         datasets = list(dataset_meta_features.keys())
         algorithms = list(algorithms_meta_features.keys())
         n_datasets = len(datasets)
-        split = int(n_datasets*0.9)
+        split = int(n_datasets * 0.9)
 
         # preprocessing metafeatures
-        self.enc, self.scaler, self.metatrain_dataset_features, self.col_info = self.prep_metafeatures(dataset_meta_features)
+        self.enc, self.scaler, self.metatrain_dataset_features, self.col_info = self.prep_metafeatures(
+            dataset_meta_features)
         self.index_dataset = list(dataset_meta_features.keys())
 
         train_data = {}
@@ -234,57 +238,100 @@ class Agent():
         X_best_time = []
         y_best_time = []
 
+        x_first_time = []
+
         for i, dataset in enumerate(datasets):
-            X =[]
+            X = []
             y_val = []
             y_test = []
             perf_hist = []
             time_budget = float(dataset_meta_features[dataset]["time_budget"])
-            self.best_algorithm_per_dataset[dataset] = {"id_test":0, "perf_test":0, "id_val":0, "perf_val":0}
+            self.best_algorithm_per_dataset[dataset] = {
+                "id_test": 0, "perf_test": 0, "id_val": 0, "perf_val": 0
+            }
             idx = self.index_dataset.index(dataset)
             temp_dataset_feat = self.metatrain_dataset_features[idx].tolist()
-            
+            temp_x_first_time = []
+
             for algorithm, meta_features in algorithms_meta_features.items():
 
                 y_val += validation_learning_curves[dataset][algorithm].scores.tolist()
                 y_test += test_learning_curves[dataset][algorithm].scores.tolist()
                 timestamps = validation_learning_curves[dataset][algorithm].timestamps
                 values = [float(x) for x in list(meta_features.values())]
-                ts_prev = 0
+                ts_prev = [0]
+                val_prev = [0]
                 temp_y_val = validation_learning_curves[dataset][algorithm].scores.tolist()
+                temp_y_test = test_learning_curves[dataset][algorithm].scores.tolist()
                 X_best_time.append(values + temp_dataset_feat)
                 y_best_time.append(timestamps[np.array(temp_y_val).argmax()])
+                temp_x_first_time.append(
+                    (values, float(timestamps[0]) / time_budget, temp_y_val[0]))
 
                 for j, ts in enumerate(timestamps):
-                    X.append(values + temp_dataset_feat + [j, ts_prev/time_budget])
-                    X_time.append(values + temp_dataset_feat + [j, ts_prev/time_budget])
-                    # cost model inputs:
-                    ## HPs, dataset meta features, last seen timestamp
-                    # X_time.append(values + temp_dataset_feat + [ts_prev])
-                    y_time.append(ts - ts_prev)
-                    ts_prev = ts
+
+                    for k in range(j, len(timestamps)):
+                        ts2 = timestamps[k]
+
+                        # X.append(values + temp_dataset_feat + [j, ts_prev/time_budget, (ts2-ts_prev)/time_budget, val_prev])
+                        if self.conf["use_perf_hist"]:
+                            X.append(
+                                values + temp_dataset_feat + [j, (ts2 / time_budget - ts_prev[-1])])
+                        else:
+                            # X.append(values + temp_dataset_feat + [j, ts_prev[-1], ts2/time_budget-ts_prev[-1], val_prev[-1]])
+                            X.append(values + temp_dataset_feat + [j, ts_prev[-1],
+                                                                   ts2 / time_budget - ts_prev[-1]])
+
+                        y_val.append(temp_y_val[k])
+                        y_test.append(temp_y_test[k])
+                        perf_hist.append([ts_prev.copy(), val_prev.copy()])
+
+                    # X.append(values + temp_dataset_feat + [j, ts_prev/time_budget])
+                    X_time.append(values + temp_dataset_feat + [j, ts_prev[-1]])
+                    y_time.append(ts - ts_prev[-1] * time_budget)
+
+                    ts_prev.append(ts / time_budget)
+                    val_prev.append(y_val[j])
+
+                    # val_prev = y_val[j]
 
                 if self.best_algorithm_per_dataset[dataset]["perf_test"] < y_test[-1]:
                     self.best_algorithm_per_dataset[dataset]["id_test"] = algorithm
                     self.best_algorithm_per_dataset[dataset]["perf_test"] = y_test[-1]
 
-                if self.best_algorithm_per_dataset[dataset]["perf_val"] < y_val[-1]:
+                # if self.best_algorithm_per_dataset[dataset]["perf_val"] < y_val[-1]:
+                #    self.best_algorithm_per_dataset[dataset]["id_val"] = algorithm
+                #    self.best_algorithm_per_dataset[dataset]["perf_val"] = y_val[-1]
+
+                if self.best_algorithm_per_dataset[dataset]["perf_val"] < temp_y_val[0] / (
+                        timestamps[0] + 1):
                     self.best_algorithm_per_dataset[dataset]["id_val"] = algorithm
-                    self.best_algorithm_per_dataset[dataset]["perf_val"] = y_val[-1]
-                perf_hist.append([temp_y_val, timestamps.tolist()])
+                    self.best_algorithm_per_dataset[dataset]["perf_val"] = temp_y_val[0] / (
+                                timestamps[0] + 1)
+
+            future_tensor = []
+            if self.conf["use_perf_hist"]:
+                for conf in perf_hist:
+                    future_tensor.append([])
+                    for j, (x_j, y_j) in enumerate(zip(conf[0], conf[1])):
+                        future_tensor[-1].append([x_j, y_j])
+
+                    # assuming max_length = 9
+                    for z in range(j, 10):
+                        future_tensor[-1].append([0, 0])
 
             if i < split:
-                train_data[dataset] = {"X": X, "y_val": y_val, "y_test":y_test, "perf_hist":perf_hist}
+                train_data[dataset] = {
+                    "X": X, "y_val": y_val, "y_test": y_test,
+                    "perf_hist": future_tensor, "x_first": temp_x_first_time,
+                    "meta_feat": temp_dataset_feat
+                }
             else:
-                test_data[dataset] = {"X": X, "y_val": y_val, "y_test":y_test, "perf_hist":perf_hist}
-
-        # shuffling cost data
-        X_time = np.array(X_time)
-        y_time = np.array(y_time)
-        idx = np.arange(X_time.shape[0])
-        np.random.shuffle(idx)
-        X_time = X_time[idx]
-        y_time = y_time[idx]
+                test_data[dataset] = {
+                    "X": X, "y_val": y_val, "y_test": y_test,
+                    "perf_hist": future_tensor, "x_first": temp_x_first_time,
+                    "meta_feat": temp_dataset_feat
+                }
 
         return train_data, test_data, X_time, y_time, X_best_time, y_best_time, len(X[0])
 
@@ -328,23 +375,30 @@ class Agent():
         self.validation_learning_curves = validation_learning_curves
         self.test_learning_curves = test_learning_curves
 
-        train_data, test_data, X_cost, y_cost, X_best, y_best, input_size = self.process_data(dataset_meta_features, algorithms_meta_features, validation_learning_curves, test_learning_curves)
-        feature_extractor = MLP(input_size, n_hidden=self.n_hidden, n_layers=self.n_layers).to(self.device)        
-        self.fsbo_model = FSBO(train_data, test_data, feature_extractor=feature_extractor, conf=self.conf).to(self.device)
-        # self.fsbo_model.train(epochs=self.meta_learning_epochs, n_batches=self.n_batches)
-        self.fsbo_model.train(epochs=1, n_batches=self.n_batches)
+        train_data, test_data, X_cost, y_cost, X_best, y_best, input_size = self.process_data(
+            dataset_meta_features, algorithms_meta_features, validation_learning_curves, test_learning_curves
+        )
+        feature_extractor = MLP(
+            input_size, n_hidden=self.n_hidden, n_layers=self.n_layers, use_cnn = self.conf["use_perf_hist"]
+        ).to(self.device)
+        self.fsbo_model = FSBO(
+            train_data, test_data, feature_extractor=feature_extractor, conf=self.conf
+        ).to(self.device)
+        self.fsbo_model.train(epochs=self.meta_learning_epochs, n_batches=self.n_batches)
+        # self.fsbo_model.train(epochs=1, n_batches=self.n_batches)
         
         if self.cost_model_type == "MLP":
             model_type = "base"
             if model_type == "base":
                 arch = {
                     "n_input": len(X_cost[0]),
-                    "n_hidden": self.n_hidden,
-                    "n_layers": self.n_layers,
+                    "n_hidden": 120,  # self.n_hidden,
+                    "n_layers": 2,  # self.n_layers,
                     "n_output": 1,
-                    "dropout_rate": 0.0
+                    "dropout_rate": 0.0,
+                    "use_cnn": False
                 }
-                train_hps = {"lr": 0.0001, "epochs": 1000, "batch_size": 512, "alpha": -0.1}
+                train_hps = {"lr": 0.001, "epochs": 400, "batch_size": 256, "alpha": -0.1}
             elif model_type == "hadi":
                 # Hadi's model
                 arch = {
@@ -352,7 +406,8 @@ class Agent():
                     "n_hidden": 441,
                     "n_layers": 8,
                     "n_output": 1,
-                    "dropout_rate": 0.0010000000000000002
+                    "dropout_rate": 0.0010000000000000002,
+                    "use_cnn": False
                 }
                 train_hps = {"lr": 0.001, "epochs": 400, "batch_size": 64, "alpha": -0.018479149770895}
             else:
@@ -360,6 +415,7 @@ class Agent():
             self.cost_model = MLP(**arch).to(self.device)
 
             y_cost = torch.FloatTensor(y_cost).to(self.device)
+            y_cost = torch.log(y_cost+1)
             self.y_max_cost = torch.max(y_cost)
             # y' = log(1 + (y/y_max))
             # y = (exp(y') - 1) * y_max
@@ -372,8 +428,8 @@ class Agent():
             torch.save(self.cost_model, "cost_model.pt")
         else:
             self.cost_model = RandomForestRegressor(max_depth=50)
-            y_target = np.log(np.array(y_cost)+1)
-            self.cost_model.fit(np.array(X_cost), y_target)
+            y_cost = np.log(np.array(y_cost)+1)
+            self.cost_model.fit(np.array(X_cost), y_cost)
 
         self.best_cost_model = RandomForestRegressor(n_estimators=10)
         self.best_cost_model.fit(np.array(X_best), np.array(y_best))
@@ -381,37 +437,13 @@ class Agent():
         self.metatrained = 1
 
     def custom_loss_fn(self, y_pred, y_true, alpha=-0.1):
+        # Hadi: out = -torch.minimum(alpha*(target-input),target-input)
         # penalizing undershooting
         l1 = y_pred - y_true
         # penalizing overshooting
         l2 = alpha * (l1)
         loss = -torch.min(torch.hstack((l1, l2)), axis=1).values.mean()
         return loss
-
-    def _count_overshoot_success(self, tracker):
-        tracker = np.array(tracker)
-        overshoots = tracker[tracker >= 0]
-        undershoots = tracker[tracker < 0]
-        # % of undershoots
-        err = len(undershoots) / len(tracker)
-        # mean transformed distance of overshoots
-        mean_overshoot = np.mean(overshoots)
-        # mean transformed distance by which it undershoots
-        mean_undershoot = np.mean(undershoots)
-        return err, mean_overshoot, mean_undershoot
-
-    def _log_writer(self, writer, i, loss, tracker, val_tracker):
-        if writer is not None:
-            writer.add_scalar("Loss", loss, i)
-            err, mean_overshoot, mean_undershoot = self._count_overshoot_success(tracker)
-            writer.add_scalar("train/% of undershoots", err, i)
-            writer.add_scalar("train/mean_undershoot", mean_undershoot, i)
-            writer.add_scalar("train/mean_overshoot", mean_overshoot, i)
-            err, mean_overshoot, mean_undershoot = self._count_overshoot_success(val_tracker)
-            writer.add_scalar("val/% of undershoots", err, i)
-            writer.add_scalar("val/mean_undershoot", mean_undershoot, i)
-            writer.add_scalar("val/mean_overshoot", mean_overshoot, i)
-        return writer
 
     def train_cost_model (self,  X, y, lr=0.001, epochs=100, batch_size=512, alpha=-0.1):
 	writer = SummaryWriter()
@@ -509,6 +541,9 @@ class Agent():
             self.remaining_budget_counter = self.time_budget
             self.per_algo_cost_tracker = {algo: [] for algo in self.algorithms_list}
             self.is_success_last_cost = False
+            self.algorithms_perf_hist = torch.zeros(self.nA,2,11)
+            self.observed_lc = []
+            self.count = torch.zeros(self.nA).to(self.device)
             a = None
             b = self.algorithms_list.index(self.initial_alg_val_id)
             initial_factor = 1.
@@ -529,11 +564,15 @@ class Agent():
             if self.cost_model_type == "MLP":
                 c = ((torch.exp(self.cost_model(X)) - 1) * self.y_max_cost).item()
             else:
-                c = self.cost_model.predict(np.array(X).reshape(1, -1)).item()
-            self.last_predicted_cost = c  # np.exp(c)
-            # c = np.exp(c + initial_factor).item()
+                c = self.cost_model.predict(np.array(X).reshape(1,-1)).item()
+                #c = np.log(c+1)
+            
+            self.last_predicted_cost = c
             self.remaining_budget_counter -= c
-            suggestion = (a, b, min(c, self.remaining_budget_counter))
+            # suggestion = (a, b, min(c, self.remaining_budget_counter))
+            a_star = a
+            a = b
+            suggestion = (a_star, a, min(c, max(self.time_budget * 0.99, 1)))
 
             return suggestion
             # return a,b,c
@@ -558,12 +597,12 @@ class Agent():
         # self.convergence keeps track of the algorithms that converged (=0) to omit them in EI
         if y_val == self.validation_last_scores[algorithm_index] and y_val != 0:  # and ts==self.algorithms_cost_count[algorithm_index]:
             self.convergence[algorithm_index] = 0
+            prev_score = y_val
         else:
+            prev_score = self.validation_last_scores[algorithm_index] 
             self.validation_last_scores[algorithm_index] = y_val
 
-        j_idx = len(
-            self.per_algo_cost_tracker[self._map_algo_index(algorithm_index)]
-        )
+        j_idx = len(self.per_algo_cost_tracker[self._map_algo_index(algorithm_index)])
         finetune = False
         # record the observation when a query is successful to have data for finetuning
         if self.is_success_last_cost:
@@ -580,17 +619,9 @@ class Agent():
 
             finetune = True
 
-        X = torch.FloatTensor(self.observation_history["X"]).to(self.device)
-        y = torch.FloatTensor(self.observation_history["y"]).to(self.device)
-        z = torch.FloatTensor(self.observation_history["cost"]).to(self.device)
-        if finetune:
-            _ = self.fsbo_model.finetuning(
-                X, y,
-                epochs=self.finetuning_epochs,
-                finetuning_lr=self.finetuning_lr,
-                patience=self.finetuning_patience
-            )
-            # _ = self.train_cost_model(X, z, lr=0.0001, epochs=50)
+        ############################################
+        ############## From Sebastian ##############
+        ############################################
 
         delta_t = 0.0
         if not self.is_success_last_cost:

@@ -4,12 +4,38 @@ import torch
 import gpytorch
 import copy
 import numpy as np
+import torch.nn.functional as F
 
 
+class SmallConvNet(nn.Module):
+
+
+    def __init__(self, in_channels = 2, length = 11, out_size=5, n_filters=4, kernel_size=3):
+        super(SmallConvNet, self).__init__()
+
+        self.length = length
+        self.out_size = out_size
+        self.conv = nn.Conv1d(in_channels = in_channels, out_channels = n_filters , kernel_size = kernel_size, stride=1, padding=1)
+        self.linear = nn.Linear(n_filters*(length-2), out_size)
+
+    
+    def forward(self, x):
+
+        x = F.relu(self.conv(x))
+        x = F.max_pool1d(x, 3, stride=1)
+        x = x.flatten(start_dim=1)
+        x = F.relu(self.linear(x))
+
+        return x
 
 
 class MLP(nn.Module):
-    def __init__ (self, n_input, n_hidden, n_layers, n_output = None, batch_norm = False, dropout_rate = 0.0):
+    def __init__ (self, n_input, n_hidden, n_layers,
+                                 n_output = None, 
+                                 batch_norm = False, 
+                                 dropout_rate = 0.0,
+                                 use_cnn = True,
+                                 **kwargs):
         super(MLP, self).__init__()
         self.n_input = n_input
         self.n_hidden = n_hidden
@@ -24,7 +50,11 @@ class MLP(nn.Module):
 
         self.n_output = n_hidden if n_output is None else n_output
 
-        self.hidden.append(nn.Linear(n_input, n_hidden) )
+        if use_cnn:
+            self.small_cnn = SmallConvNet()
+            self.n_input = self.n_input + self.small_cnn.out_size
+
+        self.hidden.append(nn.Linear(self.n_input, n_hidden) )
         for i in range(1,n_layers-1):
             self.hidden.append(nn.Linear(n_hidden, n_hidden))
 
@@ -38,7 +68,12 @@ class MLP(nn.Module):
 
         self.relu = nn.ReLU()    
         
-    def forward(self,x):
+    def forward(self,x, w= None):
+
+        if w is not None:
+            w = self.small_cnn(w)
+            x = torch.cat((x, w), axis=1)
+
         x = self.hidden[0](x)
         for i in range(1, self.n_layers-1):
             
@@ -92,6 +127,7 @@ class FSBO(nn.Module):
         self.get_model_likelihood_mll(self.context_size)
         self.training_tasks = list(train_data.keys())
         self.validation_tasks = list(validation_data.keys())
+        self.use_perf_hist = conf.get("use_perf_hist", True)
 
     def get_train_batch(self):
 
@@ -103,25 +139,39 @@ class FSBO(nn.Module):
         x = torch.FloatTensor(self.train_data[task]["X"])[idx].to(self.device)
         y = torch.FloatTensor(self.train_data[task]["y_val"])[idx].to(self.device)
 
-        return x, y
+        if self.use_perf_hist:
+            w = torch.FloatTensor(self.train_data[task]["perf_hist"])[idx].transpose(1,2).to(self.device)
+        else:
+            w = None
+
+        return x, y, w
+
 
     def get_val_batch(self, task):
 
-        tasks  = list(self.train_data.keys())  
+        tasks  = list(self.validation_data.keys())  
         task = np.random.choice(tasks, 1).item()
 
-        shape = len(self.train_data[task]["X"])
+        shape = len(self.validation_data[task]["X"])
         idx_spt = np.random.randint(0, shape, self.context_size)
         idx_qry = np.random.randint(0, shape, self.context_size)
 
-        x_spt = torch.FloatTensor(self.train_data[task]["X"])[idx_spt].to(self.device)
-        y_spt = torch.FloatTensor(self.train_data[task]["y_val"])[idx_spt].to(self.device)
+        x_spt = torch.FloatTensor(self.validation_data[task]["X"])[idx_spt].to(self.device)
+        y_spt = torch.FloatTensor(self.validation_data[task]["y_val"])[idx_spt].to(self.device)
+        
+        
+        x_qry = torch.FloatTensor(self.validation_data[task]["X"])[idx_qry].to(self.device)
+        y_qry = torch.FloatTensor(self.validation_data[task]["y_val"])[idx_qry].to(self.device)
 
-        x_qry = torch.FloatTensor(self.train_data[task]["X"])[idx_qry].to(self.device)
-        y_qry = torch.FloatTensor(self.train_data[task]["y_val"])[idx_qry].to(self.device)
+        if self.use_perf_hist:
+            w_spt = torch.FloatTensor(self.validation_data[task]["perf_hist"])[idx_spt].transpose(1,2).to(self.device)
+            w_qry = torch.FloatTensor(self.validation_data[task]["perf_hist"])[idx_qry].transpose(1,2).to(self.device)
+        else:
+            w_spt = None
+            w_qry = None
 
+        return x_spt, x_qry, y_spt, y_qry, w_spt, w_qry
 
-        return x_spt, x_qry, y_spt, y_qry
 
     def get_model_likelihood_mll(self, train_size):
         train_x=torch.ones(train_size, self.feature_extractor.out_features).to(self.device)
@@ -144,9 +194,8 @@ class FSBO(nn.Module):
 
                 try:
                     optimizer.zero_grad()
-                    x, y = self.get_train_batch()
-
-                    z = self.feature_extractor(x)
+                    x, y, w = self.get_train_batch()
+                    z = self.feature_extractor(x, w)
                     self.model.set_train_data(inputs=z, targets=y)
                     predictions = self.model(z)
                     loss = -self.mll(predictions, self.model.train_targets)
@@ -168,19 +217,20 @@ class FSBO(nn.Module):
                 if done:
                     count+=1
 
+            if count>0:
+                val_losses.append(temp_val_loss/count)
+                print(val_losses[-1])
+                if best_loss>val_losses[-1]:
+                    best_loss = val_losses[-1]
+                    self.save_checkpoint(self.model_path)
 
-            val_losses.append(temp_val_loss/count)
-            print(val_losses[-1])
-            if best_loss>val_losses[-1]:
-                best_loss = val_losses[-1]
-                self.save_checkpoint(self.model_path)
-
+            
     def test(self, val_batch):
         
-        x_spt, x_qry, y_spt, y_qry = val_batch
+        x_spt, x_qry, y_spt, y_qry, w_spt, w_qry = val_batch
         done = False
         try: 
-            z_spt = self.feature_extractor(x_spt).detach()
+            z_spt = self.feature_extractor(x_spt, w_spt).detach()
             self.model.set_train_data(inputs=z_spt, targets=y_spt, strict=False)
 
             self.model.eval()
@@ -188,7 +238,7 @@ class FSBO(nn.Module):
             self.likelihood.eval()
 
             with torch.no_grad():
-                z_qry = self.feature_extractor(x_qry).detach()
+                z_qry = self.feature_extractor(x_qry, w_qry).detach()
                 pred = self.likelihood(self.model(z_qry))
                 loss = -self.mll(pred, y_qry)
             
@@ -215,7 +265,8 @@ class FSBO(nn.Module):
         self.likelihood.load_state_dict(ckpt['likelihood'])
         self.feature_extractor.load_state_dict(ckpt['net'])
 
-    def finetuning(self, x, y, epochs=10, patience=10, finetuning_lr = 0.01, tol=0.0001):
+
+    def finetuning(self, x, y, w, epochs=10, patience=10, finetuning_lr = 0.01, tol=0.0001):
 
         best_loss = np.inf
         patience_counter = 0
@@ -234,7 +285,7 @@ class FSBO(nn.Module):
             
             try:
                 optimizer.zero_grad()
-                z = self.feature_extractor(x)
+                z = self.feature_extractor(x, w)
                 self.model.set_train_data(inputs=z, targets=y, strict=False)
                 predictions = self.model(z)
                 loss = -self.mll(predictions, self.model.train_targets)
@@ -262,19 +313,18 @@ class FSBO(nn.Module):
         self.load_state_dict(weights)
         return losses
 
-    def predict(self, x_spt, y_spt, x_qry):
+    def predict(self, x_spt, y_spt, x_qry, w_spt, w_qry):
 
         self.model.eval()
         self.feature_extractor.eval()
         self.likelihood.eval()
 
-        z_spt = self.feature_extractor(x_spt)
+        z_spt = self.feature_extractor(x_spt, w_spt)
         self.model.set_train_data(inputs=z_spt, targets=y_spt, strict=False)
 
         with torch.no_grad():
-            z_qry = self.feature_extractor(x_qry)
-            _temp = self.model(z_qry)
-            pred = self.likelihood(_temp)
+            z_qry = self.feature_extractor(x_qry, w_qry)
+            pred = self.likelihood(self.model(z_qry))
 
         mu = pred.mean.detach().to("cpu").numpy().reshape(-1,)
         stddev = pred.stddev.detach().to("cpu").numpy().reshape(-1,)
