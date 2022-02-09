@@ -379,21 +379,21 @@ class Agent():
         self.fsbo_model = FSBO(
             train_data, test_data, feature_extractor=feature_extractor, conf=self.conf
         ).to(self.device)
-        # self.fsbo_model.train(epochs=self.meta_learning_epochs, n_batches=self.n_batches)
-        self.fsbo_model.train(epochs=1, n_batches=self.n_batches)
+        self.fsbo_model.train(epochs=self.meta_learning_epochs, n_batches=self.n_batches)
+        # self.fsbo_model.train(epochs=1, n_batches=self.n_batches)
         
         if self.cost_model_type == "MLP":
             model_type = "base"
             if model_type == "base":
                 arch = {
                     "n_input": len(X_cost[0]),
-                    "n_hidden": 100,  # self.n_hidden,
+                    "n_hidden": 120,  # self.n_hidden,
                     "n_layers": 2,  # self.n_layers,
                     "n_output": 1,
                     "dropout_rate": 0.0,
                     "use_cnn": False
                 }
-                train_hps = {"lr": 0.001, "epochs": 400, "batch_size": 64, "alpha": -0.1}
+                train_hps = {"lr": 0.001, "epochs": 400, "batch_size": 256, "alpha": -0.1}
             elif model_type == "hadi":
                 # Hadi's model
                 arch = {
@@ -547,7 +547,7 @@ class Agent():
             # suggestion = (a, b, min(c, self.remaining_budget_counter))
             a_star = a
             a = b
-            suggestion = (a_star, a, min(c, self.time_budget * 0.99))
+            suggestion = (a_star, a, min(c, max(self.time_budget * 0.99, 1)))
 
             return suggestion
 
@@ -714,12 +714,9 @@ class Agent():
             b = next_algorithm
 
             if self.cost_model_type == "MLP":
-                c = (self.cost_model(x) * self.y_max_cost).item()
+                c = ((torch.exp(self.cost_model(X)) - 1) * self.y_max_cost).item()
             else:
-                c = self.cost_model.predict(np.array(x).reshape(1, -1)).item()
-            c = np.exp(c).item()
-            self.last_predicted_cost = c
-            self.predicted_cost.append(c)
+                c = self.cost_model.predict(np.array(X).reshape(1,-1)).item()
         else:
             # norm_y = 1-y_pred_cost/np.log(1+self.remaining_budget_counter).item()
             # ei2 = torch.multiply(norm_y, ei)
@@ -733,9 +730,15 @@ class Agent():
         #    c = y_pred_cost_2[next_algorithm].item()
 
         a = np.argmax(self.validation_last_scores)
+        a_star = a
+        a = b
+        # c = min(c, self.remaining_budget_counter * 0.99)
         self.remaining_budget_counter -= c
+        self.last_predicted_cost = c
+        self.predicted_cost.append(c)
+        suggestion = (a_star, a, c)
 
-        return a, b, c
+        return suggestion
 
         ############################################
 
