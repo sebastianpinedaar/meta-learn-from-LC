@@ -16,7 +16,7 @@ root_dir = os.getcwd()
 default_input_dir = os.path.join(root_dir, "sample_data/")
 default_output_dir = os.path.join(root_dir, "output/")
 default_program_dir = os.path.join(root_dir, "ingestion_program/")
-default_submission_dir = os.path.join(root_dir, "sample_code_submission/")
+default_submission_dir = os.path.join(root_dir, "code_submission/")
 
 #=== Normalize time as implemented in the AutoML challenge
 normalize_t = True
@@ -301,13 +301,16 @@ def compute_ALC(df, total_time_budget):
 
 if __name__ == "__main__":
     #=== Get input and output directories
-    if len(argv)==1: # Use the default input and output directories if no arguments are provided
+    if len(argv) <= 2: # Use the default input and output directories if no arguments are provided
         input_dir = default_input_dir
         output_dir = default_output_dir
         validation_data_dir = os.path.join(input_dir, 'valid')
         test_data_dir = os.path.join(input_dir, 'test')
         meta_features_dir = os.path.join(input_dir, 'dataset_meta_features')
         algorithms_meta_features_dir = os.path.join(input_dir, 'algorithms_meta_features')
+        if len(argv) == 2:
+            output_dir = os.path.join(default_output_dir, "{}".format(argv[-1]))
+            print(output_dir)
         output_from_ingestion_program_dir = output_dir # Output from the ingestion_program
     else:
         input_dir = os.path.abspath(argv[1])
@@ -391,7 +394,8 @@ if __name__ == "__main__":
 
     #=== Compute average final score and average ALC
     average_final_score = sum(list_final_score) / len(list_final_score)
-    average_alc = sum(list_alc) / len(list_alc)
+    # TODO: fix dataset 27 for nan ALC
+    average_alc = np.nansum(list_alc) / len(list_alc)
 
     #=== Write scores.html
     write_scores_html(output_dir, output_visualizations_dir)

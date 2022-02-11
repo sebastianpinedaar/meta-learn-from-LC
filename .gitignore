@@ -1,9 +1,10 @@
 .idea
 output
 __pycache__
-scoring_program/__pycache__
+*.pyc 
+*.pt
 
-code_submission/gpytorch/*.pyc<
+code_submission/gpytorch/*.pyc
 code_submission/gpytorch/*/*.pyc
 code_submission/gpytorch/*/*/*.pyc
 code_submission/gpytorch/*/*/*/*.pyc

@@ -1,2 +1,0 @@
-average_final_score: 0.638
-average_ALC: 0.2298950404453992

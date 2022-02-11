@@ -1,4 +1,5 @@
 import os
+import sys
 from sys import argv, path
 from environment import Meta_Learning_Environment
 import random
@@ -154,9 +155,11 @@ def meta_testing(trained_agent, D_te):
 ################# MAIN FUNCTION #################
 #################################################
 
+
 if __name__ == "__main__":
+
     #=== Get input and output directories
-    if len(argv)==1: # Use the default input and output directories if no arguments are provided
+    if len(argv) <= 2: # Use the default input and output directories if no arguments are provided
         input_dir = default_input_dir
         output_dir = default_output_dir
         program_dir= default_program_dir
@@ -165,6 +168,9 @@ if __name__ == "__main__":
         test_data_dir = os.path.join(input_dir, 'test')
         meta_features_dir = os.path.join(input_dir, 'dataset_meta_features')
         algorithms_meta_features_dir = os.path.join(input_dir, 'algorithms_meta_features')
+        if len(argv) == 2:
+            output_dir = os.path.join(default_output_dir, "{}".format(argv[-1]))
+            print(output_dir)
     else:
         input_dir = os.path.abspath(argv[1])
         output_dir = os.path.abspath(argv[2])

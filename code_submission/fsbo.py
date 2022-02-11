@@ -67,8 +67,6 @@ class MLP(nn.Module):
         self.hidden.append(nn.Linear(n_hidden, self.n_output))
 
         self.relu = nn.ReLU()    
-
-
         
     def forward(self,x, w= None):
 
@@ -140,7 +138,6 @@ class FSBO(nn.Module):
         idx = np.random.randint(0, shape, self.context_size)
         x = torch.FloatTensor(self.train_data[task]["X"])[idx].to(self.device)
         y = torch.FloatTensor(self.train_data[task]["y_val"])[idx].to(self.device)
-        
 
         if self.use_perf_hist:
             w = torch.FloatTensor(self.train_data[task]["perf_hist"])[idx].transpose(1,2).to(self.device)
@@ -184,15 +181,12 @@ class FSBO(nn.Module):
 
         self.model = model.to(self.device)
         self.likelihood = likelihood.to(self.device)
-        self.mll        = gpytorch.mlls.ExactMarginalLogLikelihood(likelihood, model).to(self.device)
-    
+        self.mll = gpytorch.mlls.ExactMarginalLogLikelihood(likelihood, model).to(self.device)
 
     def train(self, epochs = 10, n_batches=100):
         
         best_loss = np.inf
-        
         val_losses = []
-
         for epoch in range(epochs):
             optimizer = torch.optim.Adam(self.parameters(), lr= self.lr)
             scheduler = self.scheduler_fn(optimizer, n_batches)
@@ -201,7 +195,6 @@ class FSBO(nn.Module):
                 try:
                     optimizer.zero_grad()
                     x, y, w = self.get_train_batch()
-
                     z = self.feature_extractor(x, w)
                     self.model.set_train_data(inputs=z, targets=y)
                     predictions = self.model(z)
@@ -284,7 +277,7 @@ class FSBO(nn.Module):
         self.feature_extractor.train()
         self.likelihood.train()
 
-        optimizer = torch.optim.Adam(self.parameters(), lr= finetuning_lr)
+        optimizer = torch.optim.Adam(self.parameters(), lr=finetuning_lr)
         losses = [np.inf]
 
 
