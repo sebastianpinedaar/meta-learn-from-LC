@@ -277,36 +277,36 @@ class Agent():
                 y_val += validation_learning_curves[dataset][algorithm].scores.tolist()
                 y_test += test_learning_curves[dataset][algorithm].scores.tolist()
                 timestamps = validation_learning_curves[dataset][algorithm].timestamps
-                timestamps = self.normalize_time(timestamps, time_budget)
-                tdiff = timestamps - np.array([0] + timestamps[:-1].tolist())
                 values = [float(x) for x in list(meta_features.values())]
                 ts_prev = [0]
                 val_prev = [0]
                 temp_y_val = validation_learning_curves[dataset][algorithm].scores.tolist()
                 temp_y_test = test_learning_curves[dataset][algorithm].scores.tolist()
                 X_best_time.append(values + temp_dataset_feat)
-                y_best_time.append(timestamps[np.array(temp_y_val).argmax()])
+                y_best_time.append(self.normalize_time(timestamps[np.array(temp_y_val).argmax()], time_budget))
                 temp_x_first_time.append(
-                    (values, float(timestamps[0]) / time_budget, temp_y_val[0]))
+                    (values, self.normalize_time(timestamps[0], time_budget), temp_y_val[0])
+                )
 
                 for j, ts in enumerate(timestamps):
 
                     for k in range(j, len(timestamps)):
                         ts2 = timestamps[k]
-                        t_delta = tdiff[k]
 
                         # X.append(values + temp_dataset_feat + [j, ts_prev/time_budget, (ts2-ts_prev)/time_budget, val_prev])
                         if self.conf["use_perf_hist"]:
                             X.append(
-                                values + temp_dataset_feat + [j,  t_delta]
-                                # values + temp_dataset_feat + [j, (ts2 / time_budget - ts_prev[-1])])
+                                # values + temp_dataset_feat + [j,  t_delta]
+                                values + temp_dataset_feat + [j, self.normalize_time(ts2 - ts_prev[-1], time_budget)]
                             )
                         else:
                             # X.append(values + temp_dataset_feat + [j, ts_prev[-1], ts2/time_budget-ts_prev[-1], val_prev[-1]])
                             X.append(
                                 values + temp_dataset_feat + [
                                     # j, ts_prev[-1],  ts2 / time_budget - ts_prev[-1]
-                                    j, ts_prev[-1], t_delta
+                                    j,
+                                    self.normalize_time(ts_prev[-1], time_budget),
+                                    self.normalize_time(ts2 - ts_prev[-1], time_budget)  #  t_delta
                                 ]
                             )
 
@@ -315,8 +315,8 @@ class Agent():
                         perf_hist.append([ts_prev.copy(), val_prev.copy()])
 
                     # X.append(values + temp_dataset_feat + [j, ts_prev/time_budget])
-                    X_time.append(values + temp_dataset_feat + [j, ts_prev[-1]])
-                    y_time.append(tdiff[-1])  # ts - ts_prev[-1] * time_budget)
+                    X_time.append(values + temp_dataset_feat + [j, self.normalize_time(ts_prev[-1], time_budget)])
+                    y_time.append(self.normalize_time(ts - ts_prev[-1], time_budget))  # * time_budget)
 
                     ts_prev.append(ts)  # / time_budget)
                     val_prev.append(y_val[j])
@@ -473,7 +473,7 @@ class Agent():
         loss = -torch.min(torch.hstack((l1, l2)), axis=1).values.mean()
         return loss
 
-    def train_cost_model (self,  X, y, lr=0.001, epochs=100, batch_size=512, alpha=-0.1):
+    def train_cost_model(self,  X, y, lr=0.001, epochs=100, batch_size=512, alpha=-0.1):
         writer = None
         writer =  SummaryWriter("./runs/custom_time/")
         optimizer = torch.optim.Adam(self.cost_model.parameters(), lr=lr)
@@ -610,11 +610,11 @@ class Agent():
                 # c = ((torch.exp(self.cost_model(X)) - 1) * self.y_max_cost).item()
                 c = self.denormalize_time(self.cost_model(X).detach().numpy(), self.time_budget)[0]
             else:
-                c = self.cost_model.predict(np.array(X).reshape(1, -1)).item()
+                c = self.denormalize_time(self.cost_model.predict(np.array(X).reshape(1, -1)).item(), self.time_budget)
                 # c = np.log(c+1)
 
-            self.last_predicted_cost = c
             delta_t = min(c, max(self.time_budget * 0.99, 1))
+            self.last_predicted_cost = delta_t
             self.remaining_budget_counter -= delta_t
             # suggestion = (a, b, min(c, self.remaining_budget_counter))
             a_star = a
@@ -690,19 +690,25 @@ class Agent():
                     ]
                 )
             self.algorithms_perf_hist[algorithm_index, :, int(j.item())] = torch.FloatTensor(
-                [prev_ts, prev_score]
+                [self.normalize_time(prev_ts, self.time_budget), prev_score]
             )
             self.observed_lc.append(self.algorithms_perf_hist[algorithm_index].tolist())
             self.algorithms_cost_count[algorithm_index] = ts
             self.observed_response.append(y_val)
-        current_time = torch.FloatTensor(self.algorithms_cost_count).reshape(-1, 1) / self.time_budget
+        #TODO: normalize current_time
+        # current_time = torch.FloatTensor(
+        #     self.normalize_time(np.array(self.algorithms_cost_count), self.time_budget)
+        # ).reshape(-1, 1)   # / self.time_budget
+        current_time = self.normalize_time(np.array(self.algorithms_cost_count), self.time_budget)
         last_scores = torch.FloatTensor(self.validation_last_scores).reshape(-1, 1)
-        best_time_pred = self.best_cost_model.predict(np.array(self.X_pre)) / self.time_budget
-        best_time_pred = torch.FloatTensor(best_time_pred).reshape(-1, 1)
-        time_to_best = torch.min(
-            best_time_pred,
-            torch.FloatTensor([self.normalize_time(self.remaining_budget_counter, self.time_budget)])
-        ) - current_time
+        best_time_pred = self.denormalize_time(self.best_cost_model.predict(np.array(self.X_pre)), self.time_budget)
+        # _remaining_t = torch.min(best_time_pred, self.remaining_budget_counter)
+        _remaining_t = np.min((best_time_pred, np.ones(len(best_time_pred)) * self.remaining_budget_counter), axis=0)
+        #TODO: check the sizes
+        time_to_best = self.normalize_time(_remaining_t - self.denormalize_time(current_time, self.time_budget), self.time_budget)
+        time_to_best = torch.Tensor(time_to_best).reshape(-1, 1)
+        current_time = torch.Tensor(current_time).reshape(-1, 1)
+        # best_time_pred = torch.FloatTensor(best_time_pred).reshape(-1, 1)
         # finetune surrogate
         x_spt = torch.FloatTensor(self.observed_configs).to(self.device)
         y_spt = torch.FloatTensor(self.observed_response).to(self.device)
@@ -726,12 +732,13 @@ class Agent():
             ), axis=1)
 
         # accounting for failures
-        x_qry[algorithm_index, -2] = x_qry[algorithm_index, -2] + self.delta_t_buffer
+        x_qry[algorithm_index, -2] = x_qry[algorithm_index, -2]  # +  self.delta_t_buffer
 
         x_qry2 = torch.concat((self.X_pre,
                                self.count.reshape(-1, 1),
                                current_time),
                               axis=1)
+
         loss_history = self.fsbo_model.finetuning(
             x_spt, y_spt, w_spt,
             epochs=self.finetuning_epochs,
@@ -748,8 +755,6 @@ class Agent():
             # y = torch.log(torch.FloatTensor(self.observed_cost) + 1)
             # if (y != 0).sum() != 0:
             #     self.train_cost_model(x[y != 0], y[y != 0], epochs=50, lr=0.1)
-            # y_pred_cost = self.cost_model(x_qry2) * self.y_max_cost
-            # y_pred_cost = self.denormalize_time(self.cost_model(x_qry2), self.time_budget)
             y_pred_cost = self.cost_model(x_qry2)
         else:
             y_pred_cost = self.cost_model.predict(np.array(
@@ -776,15 +781,18 @@ class Agent():
             print("Predicted c is -ve:", y_pred_cost[next_algorithm].item())
         c = self.denormalize_time(y_pred_cost[next_algorithm].item(), self.time_budget)
         b = next_algorithm
-
+        # False: 73, 74, 86; 1, 54
+        # True
         a = np.argmax(self.validation_last_scores)
         a_star = a
         a = b
-        c = min(c + self.delta_t_buffer, self.remaining_budget_counter)
+        # c = min(c + self.delta_t_buffer, self.remaining_budget_counter)
+        c = min(c, self.remaining_budget_counter)
         self.remaining_budget_counter -= c
         self.last_predicted_cost = c
         self.predicted_cost.append(c)
         suggestion = (a_star, a, c)
+        self.last_algo_index = a
 
         return suggestion
 
