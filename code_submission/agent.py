@@ -39,7 +39,6 @@ class Agent():
         self.observed_cost = []
         #self.device =  torch.device("cuda" if torch.cuda.is_available() else "cpu")
         self.device = "cpu"
-        self.cost_model_type = "MLP"  #"RF"
         self.acquistion_type = "ei"
         #self.acquistion_type = "cost_balanced_ei"
         self.conf = {"kernel":"52", 
@@ -60,6 +59,8 @@ class Agent():
         self.n_batches = 1000
         self.n_init = 1
         self.bias = 0
+        # cost predictor setting
+        self.cost_model_type = "RF"  # from {"MLP", "RF"}
         self.time_normalization = True
     
     def reset(self, dataset_meta_features, algorithms_meta_features):
@@ -424,7 +425,8 @@ class Agent():
                     "n_layers": 2,  # self.n_layers,
                     "n_output": 1,
                     "dropout_rate": 0.05,
-                    "use_cnn": False
+                    "use_cnn": False,
+                    "output_relu": True
                 }
                 train_hps = {"lr": 0.001, "epochs": 400, "batch_size": 64, "alpha": -0.1}
             elif model_type == "hadi":
@@ -443,20 +445,13 @@ class Agent():
             self.cost_model = MLP(**arch).to(self.device)
 
             y_cost = torch.FloatTensor(y_cost).to(self.device)
-            # y_cost = torch.log(y_cost+1)
             self.y_max_cost = torch.max(y_cost)
-            # y' = log(1 + (y/y_max))
-            # y = (exp(y') - 1) * y_max
-            # y_cost /= self.y_max_cost
-            # y_cost = torch.log(y_cost + 1)
             X_cost = torch.FloatTensor(X_cost).to(self.device)
-            # losses = self.train_cost_model(X_cost, y_cost, lr=0.0001, epochs=1000)
-            losses = self.train_cost_model(X_cost, y_cost, **train_hps)  #lr=0.001, epochs=10)
-
+            _ = self.train_cost_model(X_cost, y_cost, **train_hps)
             torch.save(self.cost_model, "cost_model.pt")
         else:
             self.cost_model = RandomForestRegressor(max_depth=50)
-            y_cost = np.log(np.array(y_cost)+1)
+            # y_cost = np.log(np.array(y_cost)+1)
             self.cost_model.fit(np.array(X_cost), y_cost)
 
         self.best_cost_model = RandomForestRegressor(n_estimators=10)
@@ -591,7 +586,6 @@ class Agent():
             self.count = torch.zeros(self.nA).to(self.device)
             a = None
             b = self.algorithms_list.index(self.initial_alg_val_id)
-            initial_factor = 1.
             # loading hyperparameter/algorithm
             algorithm_meta_feat = [
                 float(x) for x in list(
@@ -607,16 +601,12 @@ class Agent():
             X = torch.FloatTensor(X).to(self.device)
             # estimating cost to use
             if self.cost_model_type == "MLP":
-                # c = ((torch.exp(self.cost_model(X)) - 1) * self.y_max_cost).item()
                 c = self.denormalize_time(self.cost_model(X).detach().numpy(), self.time_budget)[0]
             else:
                 c = self.denormalize_time(self.cost_model.predict(np.array(X).reshape(1, -1)).item(), self.time_budget)
-                # c = np.log(c+1)
-
             delta_t = min(c, max(self.time_budget * 0.99, 1))
             self.last_predicted_cost = delta_t
             self.remaining_budget_counter -= delta_t
-            # suggestion = (a, b, min(c, self.remaining_budget_counter))
             a_star = a
             a = b
             suggestion = (a_star, a, delta_t)
@@ -654,12 +644,11 @@ class Agent():
             if self.trials[algorithm_index] == self.max_trials:
                 self.convergence[algorithm_index] = 0
             # initialized in reset()
-            if self.delta_t_buffer is None:
+            if self.delta_t_buffer is None or self.last_algo_index != algorithm_index:
                 self.delta_t_buffer = 0
-            # tracks the sum of sequence of delta_t that failed
-            self.delta_t_buffer += self.last_predicted_cost
-
-        # delta_t = 0.0 if self.is_success_last_cost else self.last_predicted_cost
+            else:
+                # tracks the sum of sequence of delta_t that failed
+                self.delta_t_buffer += self.last_predicted_cost
 
         if ts != self.algorithms_cost_count[algorithm_index] or len(self.observed_configs) == 0:
             algorithm = self.algorithms_list[algorithm_index]
@@ -695,23 +684,26 @@ class Agent():
             self.observed_lc.append(self.algorithms_perf_hist[algorithm_index].tolist())
             self.algorithms_cost_count[algorithm_index] = ts
             self.observed_response.append(y_val)
-        #TODO: normalize current_time
-        # current_time = torch.FloatTensor(
-        #     self.normalize_time(np.array(self.algorithms_cost_count), self.time_budget)
-        # ).reshape(-1, 1)   # / self.time_budget
-        current_time = self.normalize_time(np.array(self.algorithms_cost_count), self.time_budget)
-        last_scores = torch.FloatTensor(self.validation_last_scores).reshape(-1, 1)
+
+        #############
+        # Section 2 #
+        #############
+        # Finetuning and preparing next query
+
+        current_time = np.array(self.algorithms_cost_count)
         best_time_pred = self.denormalize_time(self.best_cost_model.predict(np.array(self.X_pre)), self.time_budget)
-        # _remaining_t = torch.min(best_time_pred, self.remaining_budget_counter)
-        _remaining_t = np.min((best_time_pred, np.ones(len(best_time_pred)) * self.remaining_budget_counter), axis=0)
-        #TODO: check the sizes
-        time_to_best = self.normalize_time(_remaining_t - self.denormalize_time(current_time, self.time_budget), self.time_budget)
+        time_to_best = best_time_pred - current_time
+        # TODO: handle negative
+        time_to_best[time_to_best <= 0] = self.remaining_budget_counter
+        time_to_best = np.min(
+            (time_to_best, np.ones(len(time_to_best)) * self.remaining_budget_counter), axis=0
+        )
+        # normalize times
+        time_to_best = self.normalize_time(time_to_best, self.time_budget)
+        current_time = self.normalize_time(current_time, self.time_budget)
+        # convert to tensors
         time_to_best = torch.Tensor(time_to_best).reshape(-1, 1)
         current_time = torch.Tensor(current_time).reshape(-1, 1)
-        # best_time_pred = torch.FloatTensor(best_time_pred).reshape(-1, 1)
-        # finetune surrogate
-        x_spt = torch.FloatTensor(self.observed_configs).to(self.device)
-        y_spt = torch.FloatTensor(self.observed_response).to(self.device)
 
         if self.conf["use_perf_hist"]:
             w_spt = torch.FloatTensor(self.observed_lc).to(self.device)
@@ -730,42 +722,33 @@ class Agent():
                 current_time,
                 time_to_best
             ), axis=1)
-
-        # accounting for failures
-        x_qry[algorithm_index, -2] = x_qry[algorithm_index, -2]  # +  self.delta_t_buffer
-
-        x_qry2 = torch.concat((self.X_pre,
-                               self.count.reshape(-1, 1),
-                               current_time),
-                              axis=1)
-
-        loss_history = self.fsbo_model.finetuning(
+        # finetune surrogate
+        x_spt = torch.FloatTensor(self.observed_configs).to(self.device)
+        y_spt = torch.FloatTensor(self.observed_response).to(self.device)
+        _ = self.fsbo_model.finetuning(
             x_spt, y_spt, w_spt,
             epochs=self.finetuning_epochs,
             finetuning_lr=self.finetuning_lr,
             patience=self.finetuning_patience
         )
 
-        # predicts cost
+        # accounting for failures by changing current time
+        x_qry[algorithm_index, -2] = x_qry[algorithm_index, -2] + self.delta_t_buffer
+
         if self.cost_model_type == "MLP":
-            ### Finetune budget predictor only when things work!
-            # self.cost_model = torch.load("cost_model.pt")
-            ##here: finetune##
-            # x = torch.FloatTensor(self.observed_configs)
-            # y = torch.log(torch.FloatTensor(self.observed_cost) + 1)
-            # if (y != 0).sum() != 0:
-            #     self.train_cost_model(x[y != 0], y[y != 0], epochs=50, lr=0.1)
-            y_pred_cost = self.cost_model(x_qry2)
+            # dropping the last column with time_to_best
+            y_pred_cost = self.cost_model(x_qry[:, :-1])
         else:
-            y_pred_cost = self.cost_model.predict(np.array(
-                x_qry2))  # + y_correction_pred*(1-self.remaining_budget_counter/self.time_budget)
-            # y_pred_cost = np.log(y_pred_cost+1)
-            y_pred_cost = torch.FloatTensor(y_pred_cost)
+            y_pred_cost = torch.FloatTensor(self.cost_model.predict(np.array(x_qry[:, :-1])))
+
+        # appending predicted delta_t to current_time for EI predictions
+        x_qry[:, -2] += y_pred_cost.reshape(-1)
 
         #############
-        # Section 2 #
+        # Section 3 #
         #############
         # Compute acqusition function
+
         best_y = max(self.observed_response)
         mean, std = self.fsbo_model.predict(x_spt, y_spt, x_qry, w_spt, w_qry)
         ei = torch.FloatTensor(self.EI(mean, std, best_y)).to(self.device)
@@ -779,14 +762,15 @@ class Agent():
         next_algorithm = torch.argmax(ei).item()
         if y_pred_cost[next_algorithm].item() < 0:
             print("Predicted c is -ve:", y_pred_cost[next_algorithm].item())
+        if y_pred_cost[next_algorithm].item() == 0:
+            print("Predicted c is 0:", y_pred_cost[next_algorithm].item())
+            # TODO: better heuristic or fix
+            y_pred_cost[next_algorithm] = 10
         c = self.denormalize_time(y_pred_cost[next_algorithm].item(), self.time_budget)
         b = next_algorithm
-        # False: 73, 74, 86; 1, 54
-        # True
         a = np.argmax(self.validation_last_scores)
         a_star = a
         a = b
-        # c = min(c + self.delta_t_buffer, self.remaining_budget_counter)
         c = min(c, self.remaining_budget_counter)
         self.remaining_budget_counter -= c
         self.last_predicted_cost = c

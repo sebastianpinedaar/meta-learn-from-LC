@@ -30,12 +30,10 @@ class SmallConvNet(nn.Module):
 
 
 class MLP(nn.Module):
-    def __init__ (self, n_input, n_hidden, n_layers,
-                                 n_output = None, 
-                                 batch_norm = False, 
-                                 dropout_rate = 0.0,
-                                 use_cnn = True,
-                                 **kwargs):
+    def __init__ (
+            self, n_input, n_hidden, n_layers, n_output=None, batch_norm=False, dropout_rate=0.0,
+            use_cnn=True, output_relu=False, **kwargs
+    ):
         super(MLP, self).__init__()
         self.n_input = n_input
         self.n_hidden = n_hidden
@@ -43,6 +41,7 @@ class MLP(nn.Module):
         self.batch_norm = batch_norm
         self.dropout_rate = dropout_rate
         self.out_features = n_hidden
+        self.output_relu = output_relu
 
         self.hidden = nn.ModuleList()
         self.bn = nn.ModuleList()
@@ -84,6 +83,9 @@ class MLP(nn.Module):
                 x = self.dropout[i-1](x)
             x = self.hidden[i](x)
         out = self.hidden[-1](self.relu(x))
+
+        if self.output_relu:
+            out = self.relu(out)
 
         return out
 
