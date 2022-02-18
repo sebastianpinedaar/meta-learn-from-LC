@@ -13,3 +13,5 @@ collected_data/
 config/
 results/
 
+.ipynb_checkpoints/
+.vscode/
