@@ -7,6 +7,19 @@ from sklearn.model_selection import KFold
 import time
 import datetime
 import shutil
+import argparse
+import json
+
+parser = argparse.ArgumentParser()
+parser.add_argument('--config_file', help="config_file", type=str, default=None)
+
+args = parser.parse_args()
+
+if args.config_file is not None:
+    with open("config/"+args.config_file) as f:
+        config = json.load(f)
+else:
+    config = {}
 
 #=== Verbose mode
 verbose = True
@@ -155,8 +168,9 @@ def meta_testing(trained_agent, D_te):
 #################################################
 
 if __name__ == "__main__":
+    a= True
     #=== Get input and output directories
-    if len(argv)==1: # Use the default input and output directories if no arguments are provided
+    if a: #len(argv)==1: # Use the default input and output directories if no arguments are provided
         input_dir = default_input_dir
         output_dir = default_output_dir
         program_dir= default_program_dir
@@ -210,7 +224,7 @@ if __name__ == "__main__":
     kf = KFold(n_splits=6, shuffle=False)
 
     ################## MAIN LOOP ##################
-    #=== Init a meta-learning environment
+    #=== Init a meta-learning enok :Pvironment
     env = Meta_Learning_Environment(validation_data_dir, test_data_dir, meta_features_dir, algorithms_meta_features_dir, output_dir)
 
     #=== Start iterating, each iteration involves a meta-training step and a meta-testing step
@@ -219,7 +233,7 @@ if __name__ == "__main__":
         vprint(verbose, "\n********** ITERATION " + str(iteration) + " **********")
 
         # Init a new agent instance in each iteration
-        agent = Agent(number_of_algorithms = len(list_algorithms))
+        agent = Agent(number_of_algorithms = len(list_algorithms), config =  config)
 
         #=== META-TRAINING
         trained_agent = meta_training(agent, D_tr)

@@ -9,3 +9,7 @@ code_submission/gpytorch/*/*/*.pyc
 code_submission/gpytorch/*/*/*/*.pyc
 
 
+collected_data/
+config/
+results/
+

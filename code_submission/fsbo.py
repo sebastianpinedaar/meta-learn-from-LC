@@ -51,7 +51,7 @@ class MLP(nn.Module):
         self.n_output = n_hidden if n_output is None else n_output
 
         if use_cnn:
-            self.small_cnn = SmallConvNet()
+            self.small_cnn = SmallConvNet(length=kwargs["seq_len"])
             self.n_input = self.n_input + self.small_cnn.out_size
 
         self.hidden.append(nn.Linear(self.n_input, n_hidden) )

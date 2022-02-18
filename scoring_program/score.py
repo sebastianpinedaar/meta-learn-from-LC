@@ -8,6 +8,15 @@ import matplotlib.pyplot as plt
 from glob import glob
 import base64
 
+import argparse
+import json
+
+parser = argparse.ArgumentParser()
+parser.add_argument('--config_file', help="config_file", type=str, default="01.json")
+
+args = parser.parse_args()
+
+
 #=== Verbose mode
 verbose = True
 
@@ -301,7 +310,8 @@ def compute_ALC(df, total_time_budget):
 
 if __name__ == "__main__":
     #=== Get input and output directories
-    if len(argv)==1: # Use the default input and output directories if no arguments are provided
+    a= True
+    if a:#len(argv)==1: # Use the default input and output directories if no arguments are provided
         input_dir = default_input_dir
         output_dir = default_output_dir
         validation_data_dir = os.path.join(input_dir, 'valid')
@@ -392,6 +402,12 @@ if __name__ == "__main__":
     #=== Compute average final score and average ALC
     average_final_score = sum(list_final_score) / len(list_final_score)
     average_alc = sum(list_alc) / len(list_alc)
+
+
+    results = {"total": average_alc, "per_dataset": list_alc}
+    with open("results/"+args.config_file, "w") as f:
+        json.dump(results, f)
+
 
     #=== Write scores.html
     write_scores_html(output_dir, output_visualizations_dir)

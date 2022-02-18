@@ -1,0 +1,1 @@
+{"use_ranker": false, "max_trials": 3, "norm_type": "log", "perf_measure": "ratio", "time_input": "predicted_time", "percentile": 70, "initial_factor": 1, "cost_model_type": "RF", "acquisition_type": "cost_balanced_ei", "include_subset_metafeat": false, "include_dataset_metafeat": true, "use_categorical_hp": false, "use_perf_hist": false, "use_best_alg": false}
